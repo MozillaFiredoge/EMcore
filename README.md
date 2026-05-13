@@ -9,6 +9,15 @@ The first development target is a minimal server-side core:
 - per-world service state for simulation ownership
 - a circuit-network MVP before higher-cost field or Maxwell-grid simulation work
 
+Other mods should enter through:
+
+```java
+Electromagnetics.api()
+```
+
+The current implementation installs a server-side API with per-world state and empty samplers. Circuit,
+field, and signal solvers will be attached behind those interfaces.
+
 ## Development
 
 Build the project with:
