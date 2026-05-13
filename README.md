@@ -15,8 +15,9 @@ Other mods should enter through:
 Electromagnetics.api()
 ```
 
-The current implementation installs a server-side API with per-world state and empty samplers. Circuit,
-field, and signal solvers will be attached behind those interfaces.
+The current implementation installs a server-side API with per-world state and a minimal DC circuit network.
+It supports registered ports, resistors, ideal voltage sources, and ideal wires. Field and signal solvers
+still return empty samples.
 
 ## Development
 

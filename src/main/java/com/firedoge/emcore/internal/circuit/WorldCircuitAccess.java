@@ -6,10 +6,12 @@ import java.util.OptionalDouble;
 import java.util.function.ToDoubleFunction;
 
 import com.firedoge.emcore.api.circuit.CircuitAccess;
+import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
 import com.firedoge.emcore.internal.world.EmWorldManager;
+import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 
 public final class WorldCircuitAccess implements CircuitAccess {
@@ -17,6 +19,26 @@ public final class WorldCircuitAccess implements CircuitAccess {
 
     public WorldCircuitAccess(EmWorldManager worldManager) {
         this.worldManager = Objects.requireNonNull(worldManager, "worldManager");
+    }
+
+    @Override
+    public void registerPort(ServerLevel level, CircuitPort port) {
+        worldManager.getOrCreate(level).registerCircuitPort(port);
+    }
+
+    @Override
+    public void unregisterPort(ServerLevel level, CircuitPort port) {
+        worldManager.getOrCreate(level).unregisterCircuitPort(port);
+    }
+
+    @Override
+    public void registerElement(ServerLevel level, CircuitElement element) {
+        worldManager.getOrCreate(level).registerCircuitElement(element);
+    }
+
+    @Override
+    public void unregisterElement(ServerLevel level, ResourceLocation elementId) {
+        worldManager.getOrCreate(level).unregisterCircuitElement(elementId);
     }
 
     @Override

@@ -1,15 +1,16 @@
 package com.firedoge.emcore.internal.world;
 
-import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
+import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
 import com.firedoge.emcore.api.field.ElectricFieldSample;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
 import com.firedoge.emcore.api.signal.SignalSample;
+import com.firedoge.emcore.internal.circuit.CircuitNetwork;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceKey;
@@ -21,6 +22,7 @@ public final class EmWorldState {
     private static final double GAME_TICK_SECONDS = 1.0 / 20.0;
 
     private final ResourceKey<Level> dimension;
+    private final CircuitNetwork circuitNetwork = new CircuitNetwork();
     private long gameTicks;
     private double simulatedTimeSeconds;
 
@@ -35,6 +37,7 @@ public final class EmWorldState {
     public void tick() {
         gameTicks++;
         simulatedTimeSeconds += GAME_TICK_SECONDS;
+        circuitNetwork.tick();
     }
 
     public long gameTicks() {
@@ -67,12 +70,27 @@ public final class EmWorldState {
     }
 
     public CircuitSnapshot circuitSnapshot() {
-        return new CircuitSnapshot(List.of(), List.of(), List.of(), simulatedTimeSeconds);
+        return circuitNetwork.snapshot(simulatedTimeSeconds);
     }
 
     public Optional<CircuitSample> samplePort(CircuitPort port) {
-        Objects.requireNonNull(port, "port");
-        return Optional.empty();
+        return circuitNetwork.samplePort(port);
+    }
+
+    public void registerCircuitPort(CircuitPort port) {
+        circuitNetwork.registerPort(port);
+    }
+
+    public void unregisterCircuitPort(CircuitPort port) {
+        circuitNetwork.unregisterPort(port);
+    }
+
+    public void registerCircuitElement(CircuitElement element) {
+        circuitNetwork.registerElement(element);
+    }
+
+    public void unregisterCircuitElement(ResourceLocation elementId) {
+        circuitNetwork.unregisterElement(elementId);
     }
 
     public Optional<SignalSample> sampleSignal(ResourceLocation channelId, Vec3 receiverPosition) {

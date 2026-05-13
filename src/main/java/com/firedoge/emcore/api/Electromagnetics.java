@@ -7,6 +7,7 @@ import java.util.OptionalDouble;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.firedoge.emcore.api.circuit.CircuitAccess;
+import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
@@ -99,7 +100,23 @@ public final class Electromagnetics {
     private static final class EmptyCircuitAccess implements CircuitAccess {
         @Override
         public CircuitSnapshot snapshot(ServerLevel level) {
-            return new CircuitSnapshot(List.of(), List.of(), List.of(), 0.0);
+            return new CircuitSnapshot(List.of(), List.of(), List.of(), List.of(), 0.0);
+        }
+
+        @Override
+        public void registerPort(ServerLevel level, CircuitPort port) {
+        }
+
+        @Override
+        public void unregisterPort(ServerLevel level, CircuitPort port) {
+        }
+
+        @Override
+        public void registerElement(ServerLevel level, CircuitElement element) {
+        }
+
+        @Override
+        public void unregisterElement(ServerLevel level, ResourceLocation elementId) {
         }
 
         @Override
