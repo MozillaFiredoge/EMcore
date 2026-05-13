@@ -10,6 +10,7 @@ import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
+import com.firedoge.emcore.api.circuit.CircuitTerminal;
 import com.firedoge.emcore.internal.world.EmWorldManager;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
@@ -29,6 +30,16 @@ public final class WorldCircuitAccess implements CircuitAccess {
     @Override
     public void unregisterPort(ServerLevel level, CircuitPort port) {
         worldManager.getOrCreate(level).unregisterCircuitPort(port);
+    }
+
+    @Override
+    public void registerTerminal(ServerLevel level, CircuitTerminal terminal) {
+        worldManager.getOrCreate(level).registerCircuitTerminal(terminal);
+    }
+
+    @Override
+    public void unregisterTerminal(ServerLevel level, CircuitTerminal terminal) {
+        worldManager.getOrCreate(level).unregisterCircuitTerminal(terminal);
     }
 
     @Override

@@ -5,8 +5,10 @@ import org.slf4j.Logger;
 
 import com.firedoge.emcore.api.Electromagnetics;
 import com.firedoge.emcore.internal.DefaultElectromagneticsApi;
+import com.firedoge.emcore.internal.command.EmCommands;
 import com.firedoge.emcore.internal.world.EmWorldEvents;
 import com.firedoge.emcore.internal.world.EmWorldManager;
+import com.firedoge.emcore.registry.EmRegistries;
 import net.neoforged.bus.api.IEventBus;
 import net.neoforged.fml.common.Mod;
 import net.neoforged.fml.config.ModConfig;
@@ -22,11 +24,13 @@ public final class EMcore {
     private final EmWorldManager worldManager = new EmWorldManager();
 
     public EMcore(IEventBus modEventBus, ModContainer modContainer) {
+        EmRegistries.register(modEventBus);
         modEventBus.addListener(this::commonSetup);
         modContainer.registerConfig(ModConfig.Type.COMMON, Config.SPEC);
 
         Electromagnetics.install(new DefaultElectromagneticsApi(worldManager));
         NeoForge.EVENT_BUS.register(new EmWorldEvents(worldManager));
+        NeoForge.EVENT_BUS.register(new EmCommands());
     }
 
     private void commonSetup(FMLCommonSetupEvent event) {

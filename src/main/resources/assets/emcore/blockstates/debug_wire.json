@@ -1,0 +1,19 @@
+{
+  "variants": {
+    "facing=north": {
+      "model": "emcore:block/debug_wire"
+    },
+    "facing=east": {
+      "model": "emcore:block/debug_wire",
+      "y": 90
+    },
+    "facing=south": {
+      "model": "emcore:block/debug_wire",
+      "y": 180
+    },
+    "facing=west": {
+      "model": "emcore:block/debug_wire",
+      "y": 270
+    }
+  }
+}

@@ -11,6 +11,7 @@ import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
+import com.firedoge.emcore.api.circuit.CircuitTerminal;
 import com.firedoge.emcore.api.event.ElectromagneticEventListener;
 import com.firedoge.emcore.api.field.ElectricFieldSample;
 import com.firedoge.emcore.api.field.FieldSampler;
@@ -100,7 +101,7 @@ public final class Electromagnetics {
     private static final class EmptyCircuitAccess implements CircuitAccess {
         @Override
         public CircuitSnapshot snapshot(ServerLevel level) {
-            return new CircuitSnapshot(List.of(), List.of(), List.of(), List.of(), 0.0);
+            return new CircuitSnapshot(List.of(), List.of(), List.of(), List.of(), List.of(), 0.0);
         }
 
         @Override
@@ -109,6 +110,14 @@ public final class Electromagnetics {
 
         @Override
         public void unregisterPort(ServerLevel level, CircuitPort port) {
+        }
+
+        @Override
+        public void registerTerminal(ServerLevel level, CircuitTerminal terminal) {
+        }
+
+        @Override
+        public void unregisterTerminal(ServerLevel level, CircuitTerminal terminal) {
         }
 
         @Override

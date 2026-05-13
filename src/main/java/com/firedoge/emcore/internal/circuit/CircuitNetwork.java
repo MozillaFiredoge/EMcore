@@ -14,9 +14,11 @@ import com.firedoge.emcore.api.circuit.CircuitNode;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
+import com.firedoge.emcore.api.circuit.CircuitTerminal;
 import com.firedoge.emcore.api.circuit.ResistorElement;
 import com.firedoge.emcore.api.circuit.VoltageSourceElement;
 import com.firedoge.emcore.api.circuit.WireElement;
+import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.phys.Vec3;
 
@@ -24,6 +26,9 @@ public final class CircuitNetwork {
     private static final double PIVOT_EPSILON = 1.0e-12;
 
     private final Map<CircuitPort, CircuitPort> ports = new LinkedHashMap<>();
+    private final Map<CircuitPort, Integer> portReferences = new HashMap<>();
+    private final Map<CircuitTerminal, Integer> terminalReferences = new HashMap<>();
+    private final Map<BlockPos, List<CircuitTerminal>> terminalsByNode = new LinkedHashMap<>();
     private final Map<ResourceLocation, CircuitElement> elements = new LinkedHashMap<>();
     private final Map<CircuitPort, CircuitSample> samples = new LinkedHashMap<>();
     private List<CircuitNode> nodes = List.of();
@@ -31,29 +36,44 @@ public final class CircuitNetwork {
 
     public void registerPort(CircuitPort port) {
         Objects.requireNonNull(port, "port");
-        ports.put(port, port);
-        samples.putIfAbsent(port, zeroSample(port));
+        addPortReference(port);
         dirty = true;
     }
 
     public void unregisterPort(CircuitPort port) {
         Objects.requireNonNull(port, "port");
-        ports.remove(port);
-        samples.remove(port);
-        elements.entrySet().removeIf(entry -> entry.getValue().ports().contains(port));
+        removePortReference(port);
+        dirty = true;
+    }
+
+    public void registerTerminal(CircuitTerminal terminal) {
+        Objects.requireNonNull(terminal, "terminal");
+        addTerminalReference(terminal);
+        dirty = true;
+    }
+
+    public void unregisterTerminal(CircuitTerminal terminal) {
+        Objects.requireNonNull(terminal, "terminal");
+        removeTerminalReference(terminal);
         dirty = true;
     }
 
     public void registerElement(CircuitElement element) {
         Objects.requireNonNull(element, "element");
-        element.ports().forEach(this::registerPort);
-        elements.put(element.id(), element);
+        CircuitElement previous = elements.put(element.id(), element);
+        if (previous != null) {
+            previous.ports().forEach(this::removePortReference);
+        }
+        element.ports().forEach(this::addPortReference);
         dirty = true;
     }
 
     public void unregisterElement(ResourceLocation elementId) {
         Objects.requireNonNull(elementId, "elementId");
-        elements.remove(elementId);
+        CircuitElement previous = elements.remove(elementId);
+        if (previous != null) {
+            previous.ports().forEach(this::removePortReference);
+        }
         dirty = true;
     }
 
@@ -66,6 +86,7 @@ public final class CircuitNetwork {
         return new CircuitSnapshot(
                 nodes,
                 List.copyOf(ports.keySet()),
+                terminals(),
                 List.copyOf(elements.values()),
                 List.copyOf(samples.values()),
                 simulatedTimeSeconds
@@ -111,8 +132,16 @@ public final class CircuitNetwork {
                 voltageSources.add(voltageSource);
             }
         }
+        for (List<CircuitTerminal> terminals : terminalsByNode.values()) {
+            unionTerminals(unionFind, portIndexes, terminals);
+        }
 
         Map<Integer, Integer> nodeByRoot = new LinkedHashMap<>();
+        Integer preferredGroundRoot = preferredGroundRoot(portIndexes, unionFind, voltageSources);
+        if (preferredGroundRoot != null) {
+            nodeByRoot.put(preferredGroundRoot, 0);
+        }
+
         int[] nodeByPort = new int[portList.size()];
         for (int index = 0; index < portList.size(); index++) {
             int root = unionFind.find(index);
@@ -125,6 +154,19 @@ public final class CircuitNetwork {
         }
 
         return new SolveTopology(portList, portIndexes, nodeByPort, nodeByRoot.size(), resistors, voltageSources);
+    }
+
+    private Integer preferredGroundRoot(
+            Map<CircuitPort, Integer> portIndexes,
+            UnionFind unionFind,
+            List<VoltageSourceElement> voltageSources
+    ) {
+        if (voltageSources.isEmpty()) {
+            return null;
+        }
+
+        Integer negativePortIndex = portIndexes.get(voltageSources.getFirst().negativePort());
+        return negativePortIndex == null ? null : unionFind.find(negativePortIndex);
     }
 
     private SolveResult solve(SolveTopology topology) {
@@ -140,39 +182,65 @@ public final class CircuitNetwork {
             return finish(solvedNodes, mutableSamples);
         }
 
-        int nonGroundNodes = Math.max(0, nodeCount - 1);
-        int voltageSourceOffset = nonGroundNodes;
-        int unknownCount = nonGroundNodes + topology.voltageSources().size();
+        double[] nodeVoltages = new double[nodeCount];
+        for (ComponentTopology component : buildComponents(topology)) {
+            solveComponent(topology, component, nodeVoltages, mutableSamples);
+        }
+
+        for (CircuitPort port : topology.ports()) {
+            MutableSample sample = mutableSamples.get(port);
+            sample.voltageVolts = nodeVoltages[topology.nodeOf(port)];
+        }
+
+        return finish(solvedNodes, mutableSamples);
+    }
+
+    private void solveComponent(
+            SolveTopology topology,
+            ComponentTopology component,
+            double[] nodeVoltages,
+            Map<CircuitPort, MutableSample> mutableSamples
+    ) {
+        int groundNode = chooseGroundNode(topology, component);
+        Map<Integer, Integer> nodeRows = new HashMap<>();
+
+        for (int node : component.nodes()) {
+            if (node != groundNode) {
+                nodeRows.put(node, nodeRows.size());
+            }
+        }
+
+        int voltageSourceOffset = nodeRows.size();
+        int unknownCount = nodeRows.size() + component.voltageSources().size();
         double[][] matrix = new double[unknownCount][unknownCount];
         double[] rhs = new double[unknownCount];
 
-        for (ResistorElement resistor : topology.resistors()) {
+        for (ResistorElement resistor : component.resistors()) {
             int positiveNode = topology.nodeOf(resistor.positivePort());
             int negativeNode = topology.nodeOf(resistor.negativePort());
-            addConductance(matrix, positiveNode, negativeNode, 1.0 / resistor.resistanceOhms());
+            addConductance(matrix, nodeRows, positiveNode, negativeNode, 1.0 / resistor.resistanceOhms());
         }
 
-        for (int sourceIndex = 0; sourceIndex < topology.voltageSources().size(); sourceIndex++) {
-            VoltageSourceElement source = topology.voltageSources().get(sourceIndex);
+        for (int sourceIndex = 0; sourceIndex < component.voltageSources().size(); sourceIndex++) {
+            VoltageSourceElement source = component.voltageSources().get(sourceIndex);
             int positiveNode = topology.nodeOf(source.positivePort());
             int negativeNode = topology.nodeOf(source.negativePort());
             int sourceColumn = voltageSourceOffset + sourceIndex;
 
-            addVoltageSource(matrix, rhs, positiveNode, negativeNode, sourceColumn, source.voltageVolts());
+            addVoltageSource(matrix, rhs, nodeRows, positiveNode, negativeNode, sourceColumn, source.voltageVolts());
         }
 
         double[] solved = unknownCount == 0 ? new double[0] : solveLinearSystem(matrix, rhs);
         if (solved == null) {
-            EMcore.LOGGER.warn("Circuit solve failed; retaining zero samples for {} ports", topology.ports().size());
-            return finish(solvedNodes, mutableSamples);
+            EMcore.LOGGER.warn("Circuit component solve failed; retaining zero samples for {} nodes", component.nodes().size());
+            return;
         }
 
-        double[] nodeVoltages = new double[nodeCount];
-        for (int node = 1; node < nodeCount; node++) {
-            nodeVoltages[node] = solved[node - 1];
+        for (Map.Entry<Integer, Integer> entry : nodeRows.entrySet()) {
+            nodeVoltages[entry.getKey()] = solved[entry.getValue()];
         }
 
-        for (ResistorElement resistor : topology.resistors()) {
+        for (ResistorElement resistor : component.resistors()) {
             int positiveNode = topology.nodeOf(resistor.positivePort());
             int negativeNode = topology.nodeOf(resistor.negativePort());
             double voltage = nodeVoltages[positiveNode] - nodeVoltages[negativeNode];
@@ -183,8 +251,8 @@ public final class CircuitNetwork {
             addPortContribution(mutableSamples, resistor.negativePort(), nodeVoltages[negativeNode], -current, power);
         }
 
-        for (int sourceIndex = 0; sourceIndex < topology.voltageSources().size(); sourceIndex++) {
-            VoltageSourceElement source = topology.voltageSources().get(sourceIndex);
+        for (int sourceIndex = 0; sourceIndex < component.voltageSources().size(); sourceIndex++) {
+            VoltageSourceElement source = component.voltageSources().get(sourceIndex);
             int positiveNode = topology.nodeOf(source.positivePort());
             int negativeNode = topology.nodeOf(source.negativePort());
             double current = solved[voltageSourceOffset + sourceIndex];
@@ -193,13 +261,75 @@ public final class CircuitNetwork {
             addPortContribution(mutableSamples, source.positivePort(), nodeVoltages[positiveNode], current, power);
             addPortContribution(mutableSamples, source.negativePort(), nodeVoltages[negativeNode], -current, power);
         }
+    }
 
-        for (CircuitPort port : topology.ports()) {
-            MutableSample sample = mutableSamples.get(port);
-            sample.voltageVolts = nodeVoltages[topology.nodeOf(port)];
+    private List<ComponentTopology> buildComponents(SolveTopology topology) {
+        UnionFind componentUnionFind = new UnionFind(topology.nodeCount());
+
+        for (ResistorElement resistor : topology.resistors()) {
+            connectNodes(componentUnionFind, topology, resistor.positivePort(), resistor.negativePort());
+        }
+        for (VoltageSourceElement source : topology.voltageSources()) {
+            connectNodes(componentUnionFind, topology, source.positivePort(), source.negativePort());
         }
 
-        return finish(solvedNodes, mutableSamples);
+        Map<Integer, Integer> componentIndexes = new LinkedHashMap<>();
+        List<List<Integer>> nodesByComponent = new ArrayList<>();
+        int[] componentByNode = new int[topology.nodeCount()];
+
+        for (int node = 0; node < topology.nodeCount(); node++) {
+            int root = componentUnionFind.find(node);
+            Integer componentIndex = componentIndexes.get(root);
+            if (componentIndex == null) {
+                componentIndex = nodesByComponent.size();
+                componentIndexes.put(root, componentIndex);
+                nodesByComponent.add(new ArrayList<>());
+            }
+
+            nodesByComponent.get(componentIndex).add(node);
+            componentByNode[node] = componentIndex;
+        }
+
+        List<List<ResistorElement>> resistorsByComponent = new ArrayList<>();
+        List<List<VoltageSourceElement>> sourcesByComponent = new ArrayList<>();
+        for (int index = 0; index < nodesByComponent.size(); index++) {
+            resistorsByComponent.add(new ArrayList<>());
+            sourcesByComponent.add(new ArrayList<>());
+        }
+
+        for (ResistorElement resistor : topology.resistors()) {
+            resistorsByComponent.get(componentByNode[topology.nodeOf(resistor.positivePort())]).add(resistor);
+        }
+        for (VoltageSourceElement source : topology.voltageSources()) {
+            sourcesByComponent.get(componentByNode[topology.nodeOf(source.positivePort())]).add(source);
+        }
+
+        List<ComponentTopology> components = new ArrayList<>();
+        for (int index = 0; index < nodesByComponent.size(); index++) {
+            components.add(new ComponentTopology(
+                    List.copyOf(nodesByComponent.get(index)),
+                    List.copyOf(resistorsByComponent.get(index)),
+                    List.copyOf(sourcesByComponent.get(index))
+            ));
+        }
+        return components;
+    }
+
+    private static void connectNodes(
+            UnionFind unionFind,
+            SolveTopology topology,
+            CircuitPort firstPort,
+            CircuitPort secondPort
+    ) {
+        unionFind.union(topology.nodeOf(firstPort), topology.nodeOf(secondPort));
+    }
+
+    private static int chooseGroundNode(SolveTopology topology, ComponentTopology component) {
+        for (VoltageSourceElement source : component.voltageSources()) {
+            return topology.nodeOf(source.negativePort());
+        }
+
+        return component.nodes().getFirst();
     }
 
     private List<CircuitNode> buildNodes(SolveTopology topology) {
@@ -234,9 +364,30 @@ public final class CircuitNetwork {
         }
     }
 
-    private static void addConductance(double[][] matrix, int positiveNode, int negativeNode, double conductance) {
-        int positiveRow = rowOf(positiveNode);
-        int negativeRow = rowOf(negativeNode);
+    private static void unionTerminals(
+            UnionFind unionFind,
+            Map<CircuitPort, Integer> portIndexes,
+            List<CircuitTerminal> terminals
+    ) {
+        if (terminals.size() < 2) {
+            return;
+        }
+
+        CircuitPort firstPort = terminals.getFirst().port();
+        for (int index = 1; index < terminals.size(); index++) {
+            union(unionFind, portIndexes, firstPort, terminals.get(index).port());
+        }
+    }
+
+    private static void addConductance(
+            double[][] matrix,
+            Map<Integer, Integer> nodeRows,
+            int positiveNode,
+            int negativeNode,
+            double conductance
+    ) {
+        int positiveRow = rowOf(nodeRows, positiveNode);
+        int negativeRow = rowOf(nodeRows, negativeNode);
 
         if (positiveRow >= 0) {
             matrix[positiveRow][positiveRow] += conductance;
@@ -253,13 +404,14 @@ public final class CircuitNetwork {
     private static void addVoltageSource(
             double[][] matrix,
             double[] rhs,
+            Map<Integer, Integer> nodeRows,
             int positiveNode,
             int negativeNode,
             int sourceColumn,
             double voltage
     ) {
-        int positiveRow = rowOf(positiveNode);
-        int negativeRow = rowOf(negativeNode);
+        int positiveRow = rowOf(nodeRows, positiveNode);
+        int negativeRow = rowOf(nodeRows, negativeNode);
 
         if (positiveRow >= 0) {
             matrix[positiveRow][sourceColumn] += 1.0;
@@ -273,8 +425,8 @@ public final class CircuitNetwork {
         rhs[sourceColumn] = voltage;
     }
 
-    private static int rowOf(int node) {
-        return node == 0 ? -1 : node - 1;
+    private static int rowOf(Map<Integer, Integer> nodeRows, int node) {
+        return nodeRows.getOrDefault(node, -1);
     }
 
     private static void addPortContribution(
@@ -296,6 +448,66 @@ public final class CircuitNetwork {
 
     private static CircuitSample zeroSample(CircuitPort port) {
         return new CircuitSample(port, 0.0, 0.0, 0.0, 0.0, false);
+    }
+
+    private void addPortReference(CircuitPort port) {
+        ports.put(port, port);
+        samples.putIfAbsent(port, zeroSample(port));
+        portReferences.merge(port, 1, Integer::sum);
+    }
+
+    private void removePortReference(CircuitPort port) {
+        Integer references = portReferences.get(port);
+        if (references == null) {
+            return;
+        }
+
+        if (references <= 1) {
+            portReferences.remove(port);
+            ports.remove(port);
+            samples.remove(port);
+        } else {
+            portReferences.put(port, references - 1);
+        }
+    }
+
+    private void addTerminalReference(CircuitTerminal terminal) {
+        addPortReference(terminal.port());
+
+        int references = terminalReferences.merge(terminal, 1, Integer::sum);
+        if (references == 1) {
+            terminalsByNode.computeIfAbsent(terminal.nodePosition(), ignored -> new ArrayList<>()).add(terminal);
+        }
+    }
+
+    private void removeTerminalReference(CircuitTerminal terminal) {
+        Integer references = terminalReferences.get(terminal);
+        if (references == null) {
+            return;
+        }
+
+        if (references <= 1) {
+            terminalReferences.remove(terminal);
+            List<CircuitTerminal> terminals = terminalsByNode.get(terminal.nodePosition());
+            if (terminals != null) {
+                terminals.remove(terminal);
+                if (terminals.isEmpty()) {
+                    terminalsByNode.remove(terminal.nodePosition());
+                }
+            }
+        } else {
+            terminalReferences.put(terminal, references - 1);
+        }
+
+        removePortReference(terminal.port());
+    }
+
+    private List<CircuitTerminal> terminals() {
+        List<CircuitTerminal> terminals = new ArrayList<>();
+        for (List<CircuitTerminal> nodeTerminals : terminalsByNode.values()) {
+            terminals.addAll(nodeTerminals);
+        }
+        return List.copyOf(terminals);
     }
 
     private static Vec3 centerOf(CircuitPort port) {
@@ -395,6 +607,13 @@ public final class CircuitNetwork {
     }
 
     private record SolveResult(List<CircuitNode> nodes, Map<CircuitPort, CircuitSample> samples) {
+    }
+
+    private record ComponentTopology(
+            List<Integer> nodes,
+            List<ResistorElement> resistors,
+            List<VoltageSourceElement> voltageSources
+    ) {
     }
 
     private static final class MutableSample {

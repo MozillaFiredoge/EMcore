@@ -7,6 +7,7 @@ import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
+import com.firedoge.emcore.api.circuit.CircuitTerminal;
 import com.firedoge.emcore.api.field.ElectricFieldSample;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
 import com.firedoge.emcore.api.signal.SignalSample;
@@ -83,6 +84,14 @@ public final class EmWorldState {
 
     public void unregisterCircuitPort(CircuitPort port) {
         circuitNetwork.unregisterPort(port);
+    }
+
+    public void registerCircuitTerminal(CircuitTerminal terminal) {
+        circuitNetwork.registerTerminal(terminal);
+    }
+
+    public void unregisterCircuitTerminal(CircuitTerminal terminal) {
+        circuitNetwork.unregisterTerminal(terminal);
     }
 
     public void registerCircuitElement(CircuitElement element) {

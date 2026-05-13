@@ -1,4 +1,10 @@
 {
+  "itemGroup.emcore": "Electromagnetics Core",
+  "block.emcore.debug_voltage_source": "Debug Voltage Source",
+  "block.emcore.debug_resistor": "Debug Resistor",
+  "block.emcore.debug_wire": "Debug Wire",
+  "block.emcore.debug_junction_wire": "Debug Junction Wire",
+
   "emcore.configuration.title": "EMcore Configs",
   "emcore.configuration.section.emcore.common.toml": "EMcore Configs",
   "emcore.configuration.section.emcore.common.toml.title": "EMcore Configs",

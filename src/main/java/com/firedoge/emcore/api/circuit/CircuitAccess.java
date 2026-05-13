@@ -10,6 +10,10 @@ public interface CircuitAccess {
 
     void unregisterPort(ServerLevel level, CircuitPort port);
 
+    void registerTerminal(ServerLevel level, CircuitTerminal terminal);
+
+    void unregisterTerminal(ServerLevel level, CircuitTerminal terminal);
+
     void registerElement(ServerLevel level, CircuitElement element);
 
     void unregisterElement(ServerLevel level, ResourceLocation elementId);

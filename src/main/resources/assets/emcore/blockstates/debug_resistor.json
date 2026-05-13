@@ -1,0 +1,19 @@
+{
+  "variants": {
+    "facing=north": {
+      "model": "emcore:block/debug_resistor"
+    },
+    "facing=east": {
+      "model": "emcore:block/debug_resistor",
+      "y": 90
+    },
+    "facing=south": {
+      "model": "emcore:block/debug_resistor",
+      "y": 180
+    },
+    "facing=west": {
+      "model": "emcore:block/debug_resistor",
+      "y": 270
+    }
+  }
+}
