@@ -1,0 +1,13 @@
+{
+  "itemGroup.emcore": "Example Mod Tab",
+  "block.emcore.example_block": "Example Block",
+  "item.emcore.example_item": "Example Item",
+
+  "emcore.configuration.title": "EMcore Configs",
+  "emcore.configuration.section.emcore.common.toml": "EMcore Configs",
+  "emcore.configuration.section.emcore.common.toml.title": "EMcore Configs",
+  "emcore.configuration.items": "Item List",
+  "emcore.configuration.logDirtBlock": "Log Dirt Block",
+  "emcore.configuration.magicNumberIntroduction": "Magic Number Text",
+  "emcore.configuration.magicNumber": "Magic Number"
+}
