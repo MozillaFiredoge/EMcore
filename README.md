@@ -18,6 +18,15 @@ Electromagnetics.api()
 The current implementation installs a server-side API with per-world state and a minimal DC circuit network.
 It supports registered ports, resistors, ideal voltage sources, and ideal wires. Field and signal solvers
 still return empty samples.
+Custom elements can implement `CircuitTopologyElement`, `LinearCircuitElement`, or both. Topology elements
+declare ideal node connections through `CircuitTopologyBuilder`; linear elements stamp conductance,
+current-source, voltage-source, voltage-controlled source, and current-controlled source terms through
+`CircuitEquationBuilder`. Current-controlled sources reference a `CircuitBranchCurrent`, usually returned
+by a voltage-source-like stamp or a 0V current probe. EMcore only solves and reports electrical state;
+gameplay rules such as ratings, overload behavior, damage, or shutdown remain the responsibility of the mod
+that owns the element.
+Detailed sign, current, power, branch-current, and DC/AC boundary conventions are documented in
+[`docs/circuit-api.md`](docs/circuit-api.md).
 
 Debug blocks:
 
@@ -34,6 +43,8 @@ Circuit terminals connect automatically when they declare the same world node po
 terminal layer instead of manually wiring every block together.
 Disconnected circuit components are solved independently, so an isolated test block will not invalidate other
 circuits in the same dimension.
+Circuit snapshots also expose diagnostics for invalid ideal constraints, such as a voltage source shorted by
+ideal conductors, conflicting ideal voltage sources, or a linear solve failure.
 
 Debug commands:
 
@@ -41,6 +52,8 @@ Debug commands:
 /emcore circuit list
 /emcore circuit probe <pos>
 /emcore circuit test create <pos>
+/emcore circuit test short <pos>
+/emcore circuit test conflict <pos>
 /emcore circuit test clear
 ```
 

@@ -7,6 +7,8 @@ import java.util.OptionalDouble;
 import java.util.concurrent.atomic.AtomicReference;
 
 import com.firedoge.emcore.api.circuit.CircuitAccess;
+import com.firedoge.emcore.api.circuit.AcCircuitSample;
+import com.firedoge.emcore.api.circuit.AcCircuitSnapshot;
 import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
@@ -101,7 +103,21 @@ public final class Electromagnetics {
     private static final class EmptyCircuitAccess implements CircuitAccess {
         @Override
         public CircuitSnapshot snapshot(ServerLevel level) {
-            return new CircuitSnapshot(List.of(), List.of(), List.of(), List.of(), List.of(), 0.0);
+            return new CircuitSnapshot(List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), 0.0);
+        }
+
+        @Override
+        public AcCircuitSnapshot acSnapshot(ServerLevel level, double frequencyHertz) {
+            return new AcCircuitSnapshot(
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    List.of(),
+                    frequencyHertz,
+                    0.0
+            );
         }
 
         @Override
@@ -130,6 +146,11 @@ public final class Electromagnetics {
 
         @Override
         public Optional<CircuitSample> samplePort(ServerLevel level, CircuitPort port) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<AcCircuitSample> sampleAcPort(ServerLevel level, CircuitPort port, double frequencyHertz) {
             return Optional.empty();
         }
 

@@ -3,6 +3,8 @@ package com.firedoge.emcore.internal.world;
 import java.util.Objects;
 import java.util.Optional;
 
+import com.firedoge.emcore.api.circuit.AcCircuitSample;
+import com.firedoge.emcore.api.circuit.AcCircuitSnapshot;
 import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
@@ -74,8 +76,16 @@ public final class EmWorldState {
         return circuitNetwork.snapshot(simulatedTimeSeconds);
     }
 
+    public AcCircuitSnapshot acCircuitSnapshot(double frequencyHertz) {
+        return circuitNetwork.acSnapshot(frequencyHertz, simulatedTimeSeconds);
+    }
+
     public Optional<CircuitSample> samplePort(CircuitPort port) {
         return circuitNetwork.samplePort(port);
+    }
+
+    public Optional<AcCircuitSample> sampleAcPort(CircuitPort port, double frequencyHertz) {
+        return circuitNetwork.sampleAcPort(port, frequencyHertz, simulatedTimeSeconds);
     }
 
     public void registerCircuitPort(CircuitPort port) {

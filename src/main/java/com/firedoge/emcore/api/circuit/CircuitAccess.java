@@ -20,7 +20,11 @@ public interface CircuitAccess {
 
     CircuitSnapshot snapshot(ServerLevel level);
 
+    AcCircuitSnapshot acSnapshot(ServerLevel level, double frequencyHertz);
+
     Optional<CircuitSample> samplePort(ServerLevel level, CircuitPort port);
+
+    Optional<AcCircuitSample> sampleAcPort(ServerLevel level, CircuitPort port, double frequencyHertz);
 
     OptionalDouble getVoltage(ServerLevel level, CircuitPort port);
 

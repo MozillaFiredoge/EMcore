@@ -5,6 +5,8 @@ import java.util.Optional;
 import java.util.OptionalDouble;
 import java.util.function.ToDoubleFunction;
 
+import com.firedoge.emcore.api.circuit.AcCircuitSample;
+import com.firedoge.emcore.api.circuit.AcCircuitSnapshot;
 import com.firedoge.emcore.api.circuit.CircuitAccess;
 import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
@@ -58,8 +60,18 @@ public final class WorldCircuitAccess implements CircuitAccess {
     }
 
     @Override
+    public AcCircuitSnapshot acSnapshot(ServerLevel level, double frequencyHertz) {
+        return worldManager.getOrCreate(level).acCircuitSnapshot(frequencyHertz);
+    }
+
+    @Override
     public Optional<CircuitSample> samplePort(ServerLevel level, CircuitPort port) {
         return worldManager.getOrCreate(level).samplePort(port);
+    }
+
+    @Override
+    public Optional<AcCircuitSample> sampleAcPort(ServerLevel level, CircuitPort port, double frequencyHertz) {
+        return worldManager.getOrCreate(level).sampleAcPort(port, frequencyHertz);
     }
 
     @Override

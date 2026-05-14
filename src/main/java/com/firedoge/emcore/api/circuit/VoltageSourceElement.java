@@ -9,7 +9,7 @@ public record VoltageSourceElement(
         CircuitPort positivePort,
         CircuitPort negativePort,
         double voltageVolts
-) implements CircuitElement {
+) implements LinearCircuitElement {
     public VoltageSourceElement {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(positivePort, "positivePort");
@@ -23,5 +23,10 @@ public record VoltageSourceElement(
     @Override
     public List<CircuitPort> ports() {
         return List.of(positivePort, negativePort);
+    }
+
+    @Override
+    public void stamp(CircuitEquationBuilder builder) {
+        builder.addVoltageSource(positivePort, negativePort, voltageVolts);
     }
 }

@@ -26,6 +26,11 @@ sourceSets.main.resources {
     exclude("src/generated/**/.cache") // datagen cache files
 }
 
+sourceSets.test {
+    compileClasspath += sourceSets.main.output + sourceSets.main.compileClasspath
+    runtimeClasspath += sourceSets.main.output + sourceSets.main.runtimeClasspath
+}
+
 repositories {
     // Add here additional repositories if required by some of the dependencies below.
 }
@@ -181,6 +186,22 @@ publishing {
 
 tasks.withType(JavaCompile).configureEach {
     options.encoding = 'UTF-8' // Use the UTF-8 charset for Java compilation
+}
+
+tasks.register('circuitSmokeTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs dependency-free circuit solver smoke tests.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.firedoge.emcore.internal.circuit.CircuitNetworkSmokeTest'
+    dependsOn tasks.named('testClasses')
+}
+
+tasks.named('test', Test) {
+    failOnNoDiscoveredTests = false
+}
+
+tasks.named('check') {
+    dependsOn tasks.named('circuitSmokeTest')
 }
 
 // IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.

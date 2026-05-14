@@ -3,6 +3,7 @@ package com.firedoge.emcore.internal.command;
 import com.firedoge.emcore.EMcore;
 import com.firedoge.emcore.api.Electromagnetics;
 import com.firedoge.emcore.api.circuit.CircuitAccess;
+import com.firedoge.emcore.api.circuit.CircuitDiagnostic;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
@@ -34,6 +35,7 @@ import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
 public final class EmCommands {
     private static final double TEST_VOLTAGE_VOLTS = 12.0;
+    private static final double CONFLICT_TEST_VOLTAGE_VOLTS = 5.0;
     private static final double TEST_RESISTANCE_OHMS = 6.0;
     private static final ResourceLocation TEST_OWNER = ResourceLocation.fromNamespaceAndPath(EMcore.MODID, "debug_test");
 
@@ -57,6 +59,12 @@ public final class EmCommands {
                                 .then(Commands.literal("create")
                                         .then(Commands.argument("pos", BlockPosArgument.blockPos())
                                                 .executes(this::createTestCircuit)))
+                                .then(Commands.literal("short")
+                                        .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                                                .executes(this::createShortTestCircuit)))
+                                .then(Commands.literal("conflict")
+                                        .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                                                .executes(this::createConflictTestCircuit)))
                                 .then(Commands.literal("clear")
                                         .executes(this::clearTestCircuit)))));
     }
@@ -67,15 +75,93 @@ public final class EmCommands {
 
         context.getSource().sendSuccess(() -> Component.literal(String.format(
                 Locale.ROOT,
-                "EMcore circuit %s: %d nodes, %d ports, %d terminals, %d elements, %d samples, t=%s s",
+                "EMcore circuit %s: %d nodes, %d ports, %d terminals, %d elements, %d diagnostics, %d samples, t=%s s",
                 level.dimension().location(),
                 snapshot.nodes().size(),
                 snapshot.ports().size(),
                 snapshot.terminals().size(),
                 snapshot.elements().size(),
+                snapshot.diagnostics().size(),
                 snapshot.samples().size(),
                 format(snapshot.simulatedTimeSeconds())
         )).withStyle(ChatFormatting.AQUA), false);
+
+        if (!snapshot.diagnostics().isEmpty()) {
+            context.getSource().sendSuccess(() -> Component.literal(
+                    "Diagnostics: " + snapshot.diagnostics().size()).withStyle(ChatFormatting.RED), false);
+            for (CircuitDiagnostic diagnostic : snapshot.diagnostics()) {
+                context.getSource().sendSuccess(() -> describeDiagnostic(diagnostic), false);
+            }
+        }
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private int createShortTestCircuit(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        BlockPos base = BlockPosArgument.getBlockPos(context, "pos");
+        CircuitAccess circuits = Electromagnetics.api().circuits();
+
+        unregisterTestCircuit(level);
+
+        CircuitPort positive = testPort("short_positive", base, Direction.UP);
+        CircuitPort negative = testPort("short_negative", base.east(), Direction.UP);
+        ResourceLocation voltageSourceId = testId("short_voltage_source");
+        ResourceLocation shortWireId = testId("short_wire");
+
+        circuits.registerElement(level, new VoltageSourceElement(
+                voltageSourceId,
+                positive,
+                negative,
+                TEST_VOLTAGE_VOLTS
+        ));
+        circuits.registerElement(level, new WireElement(shortWireId, positive, negative));
+
+        testCircuits.put(level.dimension(), new TestCircuit(
+                List.of(positive, negative),
+                List.of(voltageSourceId, shortWireId)
+        ));
+
+        context.getSource().sendSuccess(() -> Component.literal(
+                "Created EMcore short test circuit; /emcore circuit list should report VOLTAGE_SOURCE_SHORT"
+        ).withStyle(ChatFormatting.YELLOW), false);
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private int createConflictTestCircuit(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        BlockPos base = BlockPosArgument.getBlockPos(context, "pos");
+        CircuitAccess circuits = Electromagnetics.api().circuits();
+
+        unregisterTestCircuit(level);
+
+        CircuitPort positive = testPort("conflict_positive", base, Direction.UP);
+        CircuitPort negative = testPort("conflict_negative", base.east(), Direction.UP);
+        ResourceLocation firstSourceId = testId("conflict_voltage_source_12v");
+        ResourceLocation secondSourceId = testId("conflict_voltage_source_5v");
+
+        circuits.registerElement(level, new VoltageSourceElement(
+                firstSourceId,
+                positive,
+                negative,
+                TEST_VOLTAGE_VOLTS
+        ));
+        circuits.registerElement(level, new VoltageSourceElement(
+                secondSourceId,
+                positive,
+                negative,
+                CONFLICT_TEST_VOLTAGE_VOLTS
+        ));
+
+        testCircuits.put(level.dimension(), new TestCircuit(
+                List.of(positive, negative),
+                List.of(firstSourceId, secondSourceId)
+        ));
+
+        context.getSource().sendSuccess(() -> Component.literal(
+                "Created EMcore conflict test circuit; /emcore circuit list should report VOLTAGE_SOURCE_CONFLICT"
+        ).withStyle(ChatFormatting.YELLOW), false);
 
         return Command.SINGLE_SUCCESS;
     }
@@ -207,6 +293,22 @@ public final class EmCommands {
                 .append(Component.literal(" V=" + format(sample.voltageVolts()) + "V").withStyle(ChatFormatting.AQUA))
                 .append(Component.literal(" I=" + format(sample.currentAmps()) + "A").withStyle(ChatFormatting.GREEN))
                 .append(Component.literal(" P=" + format(sample.powerWatts()) + "W").withStyle(ChatFormatting.GOLD));
+    }
+
+    private static MutableComponent describeDiagnostic(CircuitDiagnostic diagnostic) {
+        ChatFormatting style = switch (diagnostic.severity()) {
+            case ERROR -> ChatFormatting.RED;
+            case WARNING -> ChatFormatting.YELLOW;
+            case INFO -> ChatFormatting.GRAY;
+        };
+
+        MutableComponent component = Component.literal(diagnostic.severity() + " " + diagnostic.type())
+                .withStyle(style)
+                .append(Component.literal(": " + diagnostic.message()).withStyle(ChatFormatting.WHITE));
+        if (!diagnostic.ports().isEmpty()) {
+            component.append(Component.literal(" ports=" + diagnostic.ports().size()).withStyle(ChatFormatting.DARK_GRAY));
+        }
+        return component;
     }
 
     private static String format(BlockPos position) {

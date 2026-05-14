@@ -1,15 +1,23 @@
-package com.firedoge.emcore.api.circuit;
+package com.firedoge.emcore.examples.circuit;
 
 import java.util.List;
 import java.util.Objects;
+
+import com.firedoge.emcore.api.circuit.CircuitPort;
+import com.firedoge.emcore.api.circuit.CircuitTopologyBuilder;
+import com.firedoge.emcore.api.circuit.CircuitTopologyElement;
 import net.minecraft.resources.ResourceLocation;
 
-public record WireElement(
+/**
+ * Minimal topology-only switch example. Closed switches collapse both ports into one node.
+ */
+public record ExampleClosedSwitchElement(
         ResourceLocation id,
         CircuitPort firstPort,
-        CircuitPort secondPort
+        CircuitPort secondPort,
+        boolean closed
 ) implements CircuitTopologyElement {
-    public WireElement {
+    public ExampleClosedSwitchElement {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(firstPort, "firstPort");
         Objects.requireNonNull(secondPort, "secondPort");
@@ -22,6 +30,8 @@ public record WireElement(
 
     @Override
     public void buildTopology(CircuitTopologyBuilder builder) {
-        builder.connectIdeal(firstPort, secondPort);
+        if (closed) {
+            builder.connectIdeal(firstPort, secondPort);
+        }
     }
 }

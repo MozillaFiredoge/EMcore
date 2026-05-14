@@ -1,0 +1,12 @@
+package com.firedoge.emcore.api.circuit;
+
+public enum CircuitDiagnosticType {
+    ELEMENT_TOPOLOGY_FAILED,
+    ELEMENT_STAMP_FAILED,
+    BRANCH_CURRENT_CONFLICT,
+    BRANCH_CURRENT_NOT_FOUND,
+    DENSE_SOLVER_SCALE_WARNING,
+    VOLTAGE_SOURCE_SHORT,
+    VOLTAGE_SOURCE_CONFLICT,
+    SOLVE_FAILED
+}

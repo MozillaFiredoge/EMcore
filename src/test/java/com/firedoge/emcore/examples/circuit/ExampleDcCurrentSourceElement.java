@@ -1,22 +1,28 @@
-package com.firedoge.emcore.api.circuit;
+package com.firedoge.emcore.examples.circuit;
 
 import java.util.List;
 import java.util.Objects;
+
+import com.firedoge.emcore.api.circuit.CircuitEquationBuilder;
+import com.firedoge.emcore.api.circuit.CircuitPort;
+import com.firedoge.emcore.api.circuit.LinearCircuitElement;
 import net.minecraft.resources.ResourceLocation;
 
-public record ResistorElement(
+/**
+ * Minimal DC current source example for addon authors.
+ */
+public record ExampleDcCurrentSourceElement(
         ResourceLocation id,
         CircuitPort positivePort,
         CircuitPort negativePort,
-        double resistanceOhms
+        double currentAmps
 ) implements LinearCircuitElement {
-    public ResistorElement {
+    public ExampleDcCurrentSourceElement {
         Objects.requireNonNull(id, "id");
         Objects.requireNonNull(positivePort, "positivePort");
         Objects.requireNonNull(negativePort, "negativePort");
-
-        if (!Double.isFinite(resistanceOhms) || resistanceOhms <= 0.0) {
-            throw new IllegalArgumentException("resistanceOhms must be finite and greater than zero");
+        if (!Double.isFinite(currentAmps)) {
+            throw new IllegalArgumentException("currentAmps must be finite");
         }
     }
 
@@ -27,6 +33,6 @@ public record ResistorElement(
 
     @Override
     public void stamp(CircuitEquationBuilder builder) {
-        builder.addConductance(positivePort, negativePort, 1.0 / resistanceOhms);
+        builder.addCurrentSource(positivePort, negativePort, currentAmps);
     }
 }
