@@ -20,6 +20,7 @@ import com.firedoge.emcore.api.field.FieldSampler;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
 import com.firedoge.emcore.api.signal.SignalAccess;
 import com.firedoge.emcore.api.signal.SignalSample;
+import com.firedoge.emcore.api.signal.SignalSource;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceLocation;
@@ -121,6 +122,11 @@ public final class Electromagnetics {
         }
 
         @Override
+        public CircuitSnapshot stepTransient(ServerLevel level, double timeStepSeconds) {
+            return new CircuitSnapshot(List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), 0.0);
+        }
+
+        @Override
         public void registerPort(ServerLevel level, CircuitPort port) {
         }
 
@@ -176,6 +182,19 @@ public final class Electromagnetics {
     }
 
     private static final class EmptySignalAccess implements SignalAccess {
+        @Override
+        public void registerSource(ServerLevel level, SignalSource source) {
+        }
+
+        @Override
+        public void unregisterSource(ServerLevel level, ResourceLocation sourceId) {
+        }
+
+        @Override
+        public List<SignalSource> sources(ServerLevel level) {
+            return List.of();
+        }
+
         @Override
         public Optional<SignalSample> sample(ServerLevel level, ResourceLocation channelId, Vec3 receiverPosition) {
             return Optional.empty();

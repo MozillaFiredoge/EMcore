@@ -81,4 +81,19 @@ final class MnaTopologySupport {
     ) {
         disjointSet.union(topology.nodeOf(firstPort), topology.nodeOf(secondPort));
     }
+
+    static void connectPorts(
+            DisjointSet disjointSet,
+            NodeLookup topology,
+            List<CircuitPort> ports
+    ) {
+        if (ports.size() < 2) {
+            return;
+        }
+
+        CircuitPort firstPort = ports.getFirst();
+        for (int index = 1; index < ports.size(); index++) {
+            connectNodes(disjointSet, topology, firstPort, ports.get(index));
+        }
+    }
 }

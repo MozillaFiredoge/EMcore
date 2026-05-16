@@ -28,6 +28,10 @@ import com.firedoge.emcore.api.circuit.CircuitTerminal;
 import com.firedoge.emcore.api.circuit.CircuitTopologyBuilder;
 import com.firedoge.emcore.api.circuit.CircuitTopologyElement;
 import com.firedoge.emcore.api.circuit.LinearCircuitElement;
+import com.firedoge.emcore.api.circuit.NonlinearCircuitElement;
+import com.firedoge.emcore.api.circuit.NonlinearCircuitEquationBuilder;
+import com.firedoge.emcore.api.circuit.TransientCircuitElement;
+import com.firedoge.emcore.api.circuit.TransientCircuitEquationBuilder;
 import net.minecraft.core.BlockPos;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.phys.Vec3;
@@ -39,6 +43,9 @@ public final class CircuitNetwork {
     private final Map<BlockPos, List<CircuitTerminal>> terminalsByNode = new LinkedHashMap<>();
     private final Map<ResourceLocation, CircuitElement> elements = new LinkedHashMap<>();
     private final Map<CircuitPort, CircuitSample> samples = new LinkedHashMap<>();
+    private final Map<ResourceLocation, Double> transientVoltages = new HashMap<>();
+    private final Map<ResourceLocation, Double> transientCurrents = new HashMap<>();
+    private final Map<CircuitPort, Double> transientPortVoltages = new HashMap<>();
     private List<CircuitNode> nodes = List.of();
     private List<CircuitDiagnostic> diagnostics = List.of();
     private boolean dirty = true;
@@ -104,6 +111,7 @@ public final class CircuitNetwork {
     }
 
     public AcCircuitSnapshot acSnapshot(double frequencyHertz, double simulatedTimeSeconds) {
+        solveIfDirty();
         AcSolveTopology topology = buildAcTopology(frequencyHertz);
         AcSolveResult result = AcMnaSolver.solve(topology, buildNodes(topology));
         return new AcCircuitSnapshot(
@@ -133,6 +141,36 @@ public final class CircuitNetwork {
         return acSnapshot(frequencyHertz, simulatedTimeSeconds).samples().stream()
                 .filter(sample -> sample.port().equals(port))
                 .findFirst();
+    }
+
+    public CircuitSnapshot stepTransient(double timeStepSeconds, double simulatedTimeSeconds) {
+        if (!Double.isFinite(timeStepSeconds) || timeStepSeconds <= 0.0) {
+            throw new IllegalArgumentException("timeStepSeconds must be finite and greater than zero");
+        }
+
+        SolveTopology topology = buildTransientTopology(timeStepSeconds);
+        SolveResult result = MnaSolver.solve(topology, buildNodes(topology));
+        Map<CircuitPort, CircuitSample> transientSamples = withTransientStoredEnergy(
+                result.samples(),
+                topology.transientCapacitances(),
+                topology.transientInductances()
+        );
+
+        if (!hasError(result.diagnostics())) {
+            updateTransientVoltages(topology.transientCapacitances(), transientSamples);
+            updateTransientCurrents(topology.transientInductances(), transientSamples);
+            updateTransientPortVoltages(transientSamples);
+        }
+
+        return new CircuitSnapshot(
+                result.nodes(),
+                List.copyOf(ports.keySet()),
+                terminals(),
+                List.copyOf(elements.values()),
+                result.diagnostics(),
+                List.copyOf(transientSamples.values()),
+                simulatedTimeSeconds
+        );
     }
 
     private void solveIfDirty() {
@@ -196,6 +234,7 @@ public final class CircuitNetwork {
                 portIndexes,
                 nodeByPort,
                 nodeByRoot.size(),
+                new double[nodeByRoot.size()],
                 equationRecorder.conductances(),
                 equationRecorder.currentSources(),
                 equationRecorder.voltageSources(),
@@ -203,7 +242,87 @@ public final class CircuitNetwork {
                 equationRecorder.voltageControlledVoltageSources(),
                 equationRecorder.currentControlledCurrentSources(),
                 equationRecorder.currentControlledVoltageSources(),
+                nonlinearElements(),
+                List.of(),
+                List.of(),
                 combineDiagnostics(topologyRecorder.diagnostics(), equationRecorder.diagnostics())
+        );
+    }
+
+    private SolveTopology buildTransientTopology(double timeStepSeconds) {
+        List<CircuitPort> portList = new ArrayList<>(ports.keySet());
+        Map<CircuitPort, Integer> portIndexes = new HashMap<>();
+        for (int index = 0; index < portList.size(); index++) {
+            portIndexes.put(portList.get(index), index);
+        }
+
+        DisjointSet unionFind = new DisjointSet(portList.size());
+        TopologyRecorder topologyRecorder = new TopologyRecorder(portIndexes, unionFind);
+        EquationRecorder equationRecorder = new EquationRecorder(portIndexes);
+        TransientEquationRecorder transientRecorder = new TransientEquationRecorder(
+                portIndexes,
+                timeStepSeconds,
+                transientVoltages,
+                transientCurrents
+        );
+
+        for (CircuitElement element : elements.values()) {
+            if (element instanceof CircuitTopologyElement topologyElement) {
+                topologyRecorder.record(element, topologyElement);
+            }
+        }
+        for (CircuitElement element : elements.values()) {
+            if (element instanceof LinearCircuitElement linearElement) {
+                equationRecorder.record(element, linearElement);
+            }
+        }
+        for (CircuitElement element : elements.values()) {
+            if (element instanceof TransientCircuitElement transientElement) {
+                transientRecorder.record(element, transientElement);
+            }
+        }
+        for (List<CircuitTerminal> terminals : terminalsByNode.values()) {
+            unionTerminals(unionFind, portIndexes, terminals);
+        }
+
+        Map<Integer, Integer> nodeByRoot = new LinkedHashMap<>();
+        Integer preferredGroundRoot = preferredGroundRoot(portIndexes, unionFind, equationRecorder.voltageSources());
+        if (preferredGroundRoot != null) {
+            nodeByRoot.put(preferredGroundRoot, 0);
+        }
+
+        int[] nodeByPort = new int[portList.size()];
+        for (int index = 0; index < portList.size(); index++) {
+            int root = unionFind.find(index);
+            Integer nodeIndex = nodeByRoot.get(root);
+            if (nodeIndex == null) {
+                nodeIndex = nodeByRoot.size();
+                nodeByRoot.put(root, nodeIndex);
+            }
+            nodeByPort[index] = nodeIndex;
+        }
+
+        return new SolveTopology(
+                portList,
+                portIndexes,
+                nodeByPort,
+                nodeByRoot.size(),
+                initialNodeVoltages(portList, nodeByPort, nodeByRoot.size(), transientPortVoltages),
+                combineConductances(equationRecorder.conductances(), transientRecorder.conductances()),
+                combineCurrentSources(equationRecorder.currentSources(), transientRecorder.currentSources()),
+                equationRecorder.voltageSources(),
+                equationRecorder.voltageControlledCurrentSources(),
+                equationRecorder.voltageControlledVoltageSources(),
+                equationRecorder.currentControlledCurrentSources(),
+                equationRecorder.currentControlledVoltageSources(),
+                nonlinearElements(),
+                transientRecorder.capacitances(),
+                transientRecorder.inductances(),
+                combineDiagnostics(
+                        topologyRecorder.diagnostics(),
+                        equationRecorder.diagnostics(),
+                        transientRecorder.diagnostics()
+                )
         );
     }
 
@@ -221,6 +340,7 @@ public final class CircuitNetwork {
         DisjointSet unionFind = new DisjointSet(portList.size());
         TopologyRecorder topologyRecorder = new TopologyRecorder(portIndexes, unionFind);
         AcEquationRecorder equationRecorder = new AcEquationRecorder(portIndexes, frequencyHertz);
+        SmallSignalNonlinearRecorder nonlinearRecorder = new SmallSignalNonlinearRecorder(portIndexes, samples);
 
         for (CircuitElement element : elements.values()) {
             if (element instanceof CircuitTopologyElement topologyElement) {
@@ -230,6 +350,11 @@ public final class CircuitNetwork {
         for (CircuitElement element : elements.values()) {
             if (element instanceof AcLinearCircuitElement linearElement) {
                 equationRecorder.record(element, linearElement);
+            }
+        }
+        if (!hasDcOperatingPointError()) {
+            for (NonlinearElementStamp nonlinearElement : nonlinearElements()) {
+                nonlinearRecorder.record(nonlinearElement);
             }
         }
         for (List<CircuitTerminal> terminals : terminalsByNode.values()) {
@@ -259,32 +384,228 @@ public final class CircuitNetwork {
                 nodeByPort,
                 nodeByRoot.size(),
                 frequencyHertz,
-                equationRecorder.admittances(),
+                combineAdmittances(equationRecorder.admittances(), nonlinearRecorder.admittances()),
                 equationRecorder.currentSources(),
                 equationRecorder.voltageSources(),
                 equationRecorder.voltageControlledCurrentSources(),
                 equationRecorder.voltageControlledVoltageSources(),
                 equationRecorder.currentControlledCurrentSources(),
                 equationRecorder.currentControlledVoltageSources(),
-                combineDiagnostics(topologyRecorder.diagnostics(), equationRecorder.diagnostics())
+                combineDiagnostics(
+                        diagnostics,
+                        topologyRecorder.diagnostics(),
+                        equationRecorder.diagnostics(),
+                        nonlinearRecorder.diagnostics()
+                )
         );
     }
 
-    private static List<CircuitDiagnostic> combineDiagnostics(
-            List<CircuitDiagnostic> topologyDiagnostics,
-            List<CircuitDiagnostic> equationDiagnostics
-    ) {
-        if (topologyDiagnostics.isEmpty()) {
-            return equationDiagnostics;
+    @SafeVarargs
+    private static List<CircuitDiagnostic> combineDiagnostics(List<CircuitDiagnostic>... diagnosticLists) {
+        int totalSize = 0;
+        for (List<CircuitDiagnostic> diagnostics : diagnosticLists) {
+            totalSize += diagnostics.size();
         }
-        if (equationDiagnostics.isEmpty()) {
-            return topologyDiagnostics;
+        if (totalSize == 0) {
+            return List.of();
         }
 
-        List<CircuitDiagnostic> combined = new ArrayList<>(topologyDiagnostics.size() + equationDiagnostics.size());
-        combined.addAll(topologyDiagnostics);
-        combined.addAll(equationDiagnostics);
+        List<CircuitDiagnostic> combined = new ArrayList<>(totalSize);
+        for (List<CircuitDiagnostic> diagnostics : diagnosticLists) {
+            combined.addAll(diagnostics);
+        }
         return List.copyOf(combined);
+    }
+
+    private static List<AcAdmittanceStamp> combineAdmittances(
+            List<AcAdmittanceStamp> first,
+            List<AcAdmittanceStamp> second
+    ) {
+        if (first.isEmpty()) {
+            return second;
+        }
+        if (second.isEmpty()) {
+            return first;
+        }
+
+        List<AcAdmittanceStamp> combined = new ArrayList<>(first.size() + second.size());
+        combined.addAll(first);
+        combined.addAll(second);
+        return List.copyOf(combined);
+    }
+
+    private static List<ConductanceStamp> combineConductances(
+            List<ConductanceStamp> first,
+            List<ConductanceStamp> second
+    ) {
+        if (first.isEmpty()) {
+            return second;
+        }
+        if (second.isEmpty()) {
+            return first;
+        }
+
+        List<ConductanceStamp> combined = new ArrayList<>(first.size() + second.size());
+        combined.addAll(first);
+        combined.addAll(second);
+        return List.copyOf(combined);
+    }
+
+    private static List<CurrentSourceStamp> combineCurrentSources(
+            List<CurrentSourceStamp> first,
+            List<CurrentSourceStamp> second
+    ) {
+        if (first.isEmpty()) {
+            return second;
+        }
+        if (second.isEmpty()) {
+            return first;
+        }
+
+        List<CurrentSourceStamp> combined = new ArrayList<>(first.size() + second.size());
+        combined.addAll(first);
+        combined.addAll(second);
+        return List.copyOf(combined);
+    }
+
+    private boolean hasDcOperatingPointError() {
+        return diagnostics.stream().anyMatch(diagnostic -> diagnostic.severity() == CircuitDiagnosticSeverity.ERROR);
+    }
+
+    private static boolean hasError(List<CircuitDiagnostic> diagnostics) {
+        return diagnostics.stream().anyMatch(diagnostic -> diagnostic.severity() == CircuitDiagnosticSeverity.ERROR);
+    }
+
+    private Map<CircuitPort, CircuitSample> withTransientStoredEnergy(
+            Map<CircuitPort, CircuitSample> solvedSamples,
+            List<TransientCapacitanceStamp> capacitances,
+            List<TransientInductanceStamp> inductances
+    ) {
+        if (capacitances.isEmpty() && inductances.isEmpty()) {
+            return solvedSamples;
+        }
+
+        Map<CircuitPort, CircuitSample> updatedSamples = new LinkedHashMap<>(solvedSamples);
+        for (TransientCapacitanceStamp capacitance : capacitances) {
+            CircuitSample positiveSample = updatedSamples.get(capacitance.positivePort());
+            CircuitSample negativeSample = updatedSamples.get(capacitance.negativePort());
+            if (positiveSample == null || negativeSample == null) {
+                continue;
+            }
+
+            double voltage = positiveSample.voltageVolts() - negativeSample.voltageVolts();
+            double storedEnergy = 0.5 * capacitance.capacitanceFarads() * voltage * voltage;
+            addStoredEnergy(updatedSamples, capacitance.positivePort(), storedEnergy);
+            addStoredEnergy(updatedSamples, capacitance.negativePort(), storedEnergy);
+        }
+        for (TransientInductanceStamp inductance : inductances) {
+            CircuitSample positiveSample = updatedSamples.get(inductance.positivePort());
+            CircuitSample negativeSample = updatedSamples.get(inductance.negativePort());
+            if (positiveSample == null || negativeSample == null) {
+                continue;
+            }
+
+            double current = transientInductorCurrent(inductance, positiveSample, negativeSample);
+            double storedEnergy = 0.5 * inductance.inductanceHenries() * current * current;
+            addStoredEnergy(updatedSamples, inductance.positivePort(), storedEnergy);
+            addStoredEnergy(updatedSamples, inductance.negativePort(), storedEnergy);
+        }
+        return updatedSamples;
+    }
+
+    private void updateTransientVoltages(
+            List<TransientCapacitanceStamp> capacitances,
+            Map<CircuitPort, CircuitSample> transientSamples
+    ) {
+        for (TransientCapacitanceStamp capacitance : capacitances) {
+            CircuitSample positiveSample = transientSamples.get(capacitance.positivePort());
+            CircuitSample negativeSample = transientSamples.get(capacitance.negativePort());
+            if (positiveSample != null && negativeSample != null) {
+                transientVoltages.put(
+                        capacitance.stateId(),
+                        positiveSample.voltageVolts() - negativeSample.voltageVolts()
+                );
+            }
+        }
+    }
+
+    private void updateTransientCurrents(
+            List<TransientInductanceStamp> inductances,
+            Map<CircuitPort, CircuitSample> transientSamples
+    ) {
+        for (TransientInductanceStamp inductance : inductances) {
+            CircuitSample positiveSample = transientSamples.get(inductance.positivePort());
+            CircuitSample negativeSample = transientSamples.get(inductance.negativePort());
+            if (positiveSample != null && negativeSample != null) {
+                transientCurrents.put(
+                        inductance.stateId(),
+                        transientInductorCurrent(inductance, positiveSample, negativeSample)
+                );
+            }
+        }
+    }
+
+    private void updateTransientPortVoltages(Map<CircuitPort, CircuitSample> transientSamples) {
+        transientPortVoltages.clear();
+        for (Map.Entry<CircuitPort, CircuitSample> entry : transientSamples.entrySet()) {
+            transientPortVoltages.put(entry.getKey(), entry.getValue().voltageVolts());
+        }
+    }
+
+    private static double transientInductorCurrent(
+            TransientInductanceStamp inductance,
+            CircuitSample positiveSample,
+            CircuitSample negativeSample
+    ) {
+        double voltage = positiveSample.voltageVolts() - negativeSample.voltageVolts();
+        return inductance.conductanceSiemens() * voltage + inductance.previousCurrentAmps();
+    }
+
+    private static void addStoredEnergy(
+            Map<CircuitPort, CircuitSample> samples,
+            CircuitPort port,
+            double storedEnergyJoules
+    ) {
+        CircuitSample sample = samples.get(port);
+        if (sample == null) {
+            return;
+        }
+
+        samples.put(port, new CircuitSample(
+                sample.port(),
+                sample.voltageVolts(),
+                sample.currentAmps(),
+                sample.powerWatts(),
+                sample.storedEnergyJoules() + storedEnergyJoules,
+                sample.overloaded()
+        ));
+    }
+
+    private static double[] initialNodeVoltages(
+            List<CircuitPort> portList,
+            int[] nodeByPort,
+            int nodeCount,
+            Map<CircuitPort, Double> portVoltages
+    ) {
+        if (portVoltages.isEmpty()) {
+            return new double[nodeCount];
+        }
+
+        double[] voltages = new double[nodeCount];
+        boolean[] assigned = new boolean[nodeCount];
+        for (int portIndex = 0; portIndex < portList.size(); portIndex++) {
+            int node = nodeByPort[portIndex];
+            if (assigned[node]) {
+                continue;
+            }
+
+            Double voltage = portVoltages.get(portList.get(portIndex));
+            if (voltage != null && Double.isFinite(voltage)) {
+                voltages[node] = voltage;
+                assigned[node] = true;
+            }
+        }
+        return voltages;
     }
 
     private Integer preferredGroundRoot(
@@ -434,11 +755,26 @@ public final class CircuitNetwork {
         );
     }
 
+    private List<NonlinearElementStamp> nonlinearElements() {
+        List<NonlinearElementStamp> nonlinearElements = new ArrayList<>();
+        for (CircuitElement element : elements.values()) {
+            if (element instanceof NonlinearCircuitElement nonlinearElement) {
+                nonlinearElements.add(new NonlinearElementStamp(
+                        element.id(),
+                        element.ports(),
+                        nonlinearElement
+                ));
+            }
+        }
+        return List.copyOf(nonlinearElements);
+    }
+
     record SolveTopology(
             List<CircuitPort> ports,
             Map<CircuitPort, Integer> portIndexes,
             int[] nodeByPort,
             int nodeCount,
+            double[] initialNodeVoltages,
             List<ConductanceStamp> conductances,
             List<CurrentSourceStamp> currentSources,
             List<VoltageSourceStamp> voltageSources,
@@ -446,6 +782,9 @@ public final class CircuitNetwork {
             List<VoltageControlledVoltageSourceStamp> voltageControlledVoltageSources,
             List<CurrentControlledCurrentSourceStamp> currentControlledCurrentSources,
             List<CurrentControlledVoltageSourceStamp> currentControlledVoltageSources,
+            List<NonlinearElementStamp> nonlinearElements,
+            List<TransientCapacitanceStamp> transientCapacitances,
+            List<TransientInductanceStamp> transientInductances,
             List<CircuitDiagnostic> diagnostics
     ) implements MnaTopologySupport.NodeLookup {
         public int nodeOf(CircuitPort port) {
@@ -576,6 +915,43 @@ public final class CircuitNetwork {
             CircuitBranchCurrent controlCurrent,
             double transresistanceOhms
     ) implements MnaTopologySupport.VoltageLikeBranch {
+    }
+
+    record NonlinearElementStamp(
+            ResourceLocation id,
+            List<CircuitPort> ports,
+            NonlinearCircuitElement element
+    ) {
+        NonlinearElementStamp {
+            ports = List.copyOf(ports);
+        }
+    }
+
+    record NonlinearCurrentStamp(
+            ResourceLocation id,
+            CircuitPort positivePort,
+            CircuitPort negativePort,
+            double currentAmps,
+            double conductanceSiemens
+    ) {
+    }
+
+    record TransientCapacitanceStamp(
+            ResourceLocation stateId,
+            CircuitPort positivePort,
+            CircuitPort negativePort,
+            double capacitanceFarads
+    ) {
+    }
+
+    record TransientInductanceStamp(
+            ResourceLocation stateId,
+            CircuitPort positivePort,
+            CircuitPort negativePort,
+            double inductanceHenries,
+            double conductanceSiemens,
+            double previousCurrentAmps
+    ) {
     }
 
     record AcAdmittanceStamp(
@@ -718,6 +1094,321 @@ public final class CircuitNetwork {
                 throw new IllegalArgumentException("Topology port was not returned by ports(): " + port);
             }
             return port;
+        }
+    }
+
+    private static final class TransientEquationRecorder implements TransientCircuitEquationBuilder {
+        private final Map<CircuitPort, Integer> portIndexes;
+        private final double timeStepSeconds;
+        private final Map<ResourceLocation, Double> previousVoltages;
+        private final Map<ResourceLocation, Double> previousCurrents;
+        private final List<ConductanceStamp> conductances = new ArrayList<>();
+        private final List<CurrentSourceStamp> currentSources = new ArrayList<>();
+        private final List<TransientCapacitanceStamp> capacitances = new ArrayList<>();
+        private final List<TransientInductanceStamp> inductances = new ArrayList<>();
+        private final List<CircuitDiagnostic> diagnostics = new ArrayList<>();
+        private ResourceLocation elementId;
+        private int capacitanceIndex;
+        private int inductanceIndex;
+
+        private TransientEquationRecorder(
+                Map<CircuitPort, Integer> portIndexes,
+                double timeStepSeconds,
+                Map<ResourceLocation, Double> previousVoltages,
+                Map<ResourceLocation, Double> previousCurrents
+        ) {
+            this.portIndexes = portIndexes;
+            this.timeStepSeconds = timeStepSeconds;
+            this.previousVoltages = previousVoltages;
+            this.previousCurrents = previousCurrents;
+        }
+
+        private void record(CircuitElement element, TransientCircuitElement transientElement) {
+            Objects.requireNonNull(element, "element");
+            Objects.requireNonNull(transientElement, "transientElement");
+
+            ResourceLocation previousElementId = elementId;
+            int previousCapacitanceIndex = capacitanceIndex;
+            int previousInductanceIndex = inductanceIndex;
+            elementId = element.id();
+            capacitanceIndex = 0;
+            inductanceIndex = 0;
+            int conductanceSize = conductances.size();
+            int currentSourceSize = currentSources.size();
+            int capacitanceSize = capacitances.size();
+            int inductanceSize = inductances.size();
+
+            try {
+                transientElement.stamp(this);
+            } catch (RuntimeException exception) {
+                trim(conductances, conductanceSize);
+                trim(currentSources, currentSourceSize);
+                trim(capacitances, capacitanceSize);
+                trim(inductances, inductanceSize);
+                diagnostics.add(new CircuitDiagnostic(
+                        CircuitDiagnosticType.ELEMENT_STAMP_FAILED,
+                        CircuitDiagnosticSeverity.ERROR,
+                        element.ports(),
+                        transientFailureMessage(element, exception)
+                ));
+                EMcore.LOGGER.warn("Transient circuit element {} failed while stamping equations", element.id(), exception);
+            } finally {
+                elementId = previousElementId;
+                capacitanceIndex = previousCapacitanceIndex;
+                inductanceIndex = previousInductanceIndex;
+            }
+        }
+
+        @Override
+        public double timeStepSeconds() {
+            return timeStepSeconds;
+        }
+
+        @Override
+        public void addCapacitance(CircuitPort positivePort, CircuitPort negativePort, double capacitanceFarads) {
+            requireFinitePositive(capacitanceFarads, "capacitanceFarads");
+            CircuitPort checkedPositivePort = requirePort(positivePort, "positivePort");
+            CircuitPort checkedNegativePort = requirePort(negativePort, "negativePort");
+            ResourceLocation stateId = nextCapacitanceStateId();
+            double companionConductance = capacitanceFarads / timeStepSeconds;
+            double previousVoltage = previousVoltages.getOrDefault(stateId, 0.0);
+            double equivalentCurrent = -companionConductance * previousVoltage;
+
+            conductances.add(new ConductanceStamp(
+                    stateId,
+                    checkedPositivePort,
+                    checkedNegativePort,
+                    companionConductance
+            ));
+            if (equivalentCurrent != 0.0) {
+                currentSources.add(new CurrentSourceStamp(
+                        stateId,
+                        checkedPositivePort,
+                        checkedNegativePort,
+                        equivalentCurrent
+                ));
+            }
+            capacitances.add(new TransientCapacitanceStamp(
+                    stateId,
+                    checkedPositivePort,
+                    checkedNegativePort,
+                    capacitanceFarads
+            ));
+        }
+
+        @Override
+        public void addInductance(CircuitPort positivePort, CircuitPort negativePort, double inductanceHenries) {
+            requireFinitePositive(inductanceHenries, "inductanceHenries");
+            CircuitPort checkedPositivePort = requirePort(positivePort, "positivePort");
+            CircuitPort checkedNegativePort = requirePort(negativePort, "negativePort");
+            ResourceLocation stateId = nextInductanceStateId();
+            double companionConductance = timeStepSeconds / inductanceHenries;
+            double previousCurrent = previousCurrents.getOrDefault(stateId, 0.0);
+
+            conductances.add(new ConductanceStamp(
+                    stateId,
+                    checkedPositivePort,
+                    checkedNegativePort,
+                    companionConductance
+            ));
+            if (previousCurrent != 0.0) {
+                currentSources.add(new CurrentSourceStamp(
+                        stateId,
+                        checkedPositivePort,
+                        checkedNegativePort,
+                        previousCurrent
+                ));
+            }
+            inductances.add(new TransientInductanceStamp(
+                    stateId,
+                    checkedPositivePort,
+                    checkedNegativePort,
+                    inductanceHenries,
+                    companionConductance,
+                    previousCurrent
+            ));
+        }
+
+        private List<ConductanceStamp> conductances() {
+            return List.copyOf(conductances);
+        }
+
+        private List<CurrentSourceStamp> currentSources() {
+            return List.copyOf(currentSources);
+        }
+
+        private List<TransientCapacitanceStamp> capacitances() {
+            return List.copyOf(capacitances);
+        }
+
+        private List<TransientInductanceStamp> inductances() {
+            return List.copyOf(inductances);
+        }
+
+        private List<CircuitDiagnostic> diagnostics() {
+            return List.copyOf(diagnostics);
+        }
+
+        private CircuitPort requirePort(CircuitPort port, String name) {
+            Objects.requireNonNull(port, name);
+            if (!portIndexes.containsKey(port)) {
+                throw new IllegalArgumentException("Transient stamped port was not returned by ports(): " + port);
+            }
+            return port;
+        }
+
+        private ResourceLocation nextCapacitanceStateId() {
+            return ResourceLocation.fromNamespaceAndPath(
+                    elementId.getNamespace(),
+                    elementId.getPath() + "/transient_capacitance/" + capacitanceIndex++
+            );
+        }
+
+        private ResourceLocation nextInductanceStateId() {
+            return ResourceLocation.fromNamespaceAndPath(
+                    elementId.getNamespace(),
+                    elementId.getPath() + "/transient_inductance/" + inductanceIndex++
+            );
+        }
+
+        private static void requireFinitePositive(double value, String name) {
+            if (!Double.isFinite(value) || value <= 0.0) {
+                throw new IllegalArgumentException(name + " must be finite and greater than zero");
+            }
+        }
+
+        private static String transientFailureMessage(CircuitElement element, RuntimeException exception) {
+            String detail = exception.getMessage();
+            if (detail == null || detail.isBlank()) {
+                return "Element " + element.id() + " failed while stamping transient equations";
+            }
+            return "Element " + element.id() + " failed while stamping transient equations: " + detail;
+        }
+
+        private static <T> void trim(List<T> values, int size) {
+            while (values.size() > size) {
+                values.removeLast();
+            }
+        }
+    }
+
+    private static final class SmallSignalNonlinearRecorder implements NonlinearCircuitEquationBuilder {
+        private final Map<CircuitPort, Integer> portIndexes;
+        private final Map<CircuitPort, CircuitSample> operatingPointSamples;
+        private final List<AcAdmittanceStamp> admittances = new ArrayList<>();
+        private final List<CircuitDiagnostic> diagnostics = new ArrayList<>();
+        private ResourceLocation elementId;
+        private List<CircuitPort> elementPorts = List.of();
+
+        private SmallSignalNonlinearRecorder(
+                Map<CircuitPort, Integer> portIndexes,
+                Map<CircuitPort, CircuitSample> operatingPointSamples
+        ) {
+            this.portIndexes = portIndexes;
+            this.operatingPointSamples = operatingPointSamples;
+        }
+
+        private void record(NonlinearElementStamp nonlinearElement) {
+            ResourceLocation previousElementId = elementId;
+            List<CircuitPort> previousElementPorts = elementPorts;
+            elementId = nonlinearElement.id();
+            elementPorts = nonlinearElement.ports();
+            int admittanceSize = admittances.size();
+
+            try {
+                nonlinearElement.element().stamp(this);
+            } catch (RuntimeException exception) {
+                trim(admittances, admittanceSize);
+                diagnostics.add(new CircuitDiagnostic(
+                        CircuitDiagnosticType.ELEMENT_STAMP_FAILED,
+                        CircuitDiagnosticSeverity.ERROR,
+                        nonlinearElement.ports(),
+                        smallSignalFailureMessage(nonlinearElement, exception)
+                ));
+                EMcore.LOGGER.warn(
+                        "Nonlinear circuit element {} failed while stamping small-signal AC equations",
+                        nonlinearElement.id(),
+                        exception
+                );
+            } finally {
+                elementId = previousElementId;
+                elementPorts = previousElementPorts;
+            }
+        }
+
+        @Override
+        public double voltage(CircuitPort positivePort, CircuitPort negativePort) {
+            CircuitPort checkedPositivePort = requirePort(positivePort, "positivePort");
+            CircuitPort checkedNegativePort = requirePort(negativePort, "negativePort");
+            return sampleVoltage(checkedPositivePort) - sampleVoltage(checkedNegativePort);
+        }
+
+        @Override
+        public void addLinearizedCurrent(
+                CircuitPort positivePort,
+                CircuitPort negativePort,
+                double currentAmps,
+                double conductanceSiemens
+        ) {
+            requireFinite(currentAmps, "currentAmps");
+            requireFinite(conductanceSiemens, "conductanceSiemens");
+            if (conductanceSiemens == 0.0) {
+                return;
+            }
+
+            admittances.add(new AcAdmittanceStamp(
+                    elementId,
+                    requirePort(positivePort, "positivePort"),
+                    requirePort(negativePort, "negativePort"),
+                    Complex.real(conductanceSiemens)
+            ));
+        }
+
+        private List<AcAdmittanceStamp> admittances() {
+            return List.copyOf(admittances);
+        }
+
+        private List<CircuitDiagnostic> diagnostics() {
+            return List.copyOf(diagnostics);
+        }
+
+        private double sampleVoltage(CircuitPort port) {
+            CircuitSample sample = operatingPointSamples.get(port);
+            return sample == null ? 0.0 : sample.voltageVolts();
+        }
+
+        private CircuitPort requirePort(CircuitPort port, String name) {
+            CircuitPort checkedPort = Objects.requireNonNull(port, name);
+            if (!elementPorts.contains(checkedPort)) {
+                throw new IllegalArgumentException("Small-signal port was not returned by ports(): " + checkedPort);
+            }
+            if (!portIndexes.containsKey(checkedPort)) {
+                throw new IllegalArgumentException("Unknown small-signal circuit port: " + checkedPort);
+            }
+            return checkedPort;
+        }
+
+        private static void requireFinite(double value, String name) {
+            if (!Double.isFinite(value)) {
+                throw new IllegalArgumentException(name + " must be finite");
+            }
+        }
+
+        private static String smallSignalFailureMessage(
+                NonlinearElementStamp element,
+                RuntimeException exception
+        ) {
+            String detail = exception.getMessage();
+            if (detail == null || detail.isBlank()) {
+                return "Element " + element.id() + " failed while stamping small-signal AC equations";
+            }
+            return "Element " + element.id() + " failed while stamping small-signal AC equations: " + detail;
+        }
+
+        private static <T> void trim(List<T> values, int size) {
+            while (values.size() > size) {
+                values.removeLast();
+            }
         }
     }
 

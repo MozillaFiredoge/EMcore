@@ -35,13 +35,18 @@ Elements can contribute topology, equations, or both.
 
 - `CircuitTopologyElement` declares ideal zero-impedance connections through `CircuitTopologyBuilder`.
 - `LinearCircuitElement` stamps real-valued DC terms through `CircuitEquationBuilder`.
+- `NonlinearCircuitElement` stamps nonlinear Newton-Raphson terms through `NonlinearCircuitEquationBuilder`.
 - `AcLinearCircuitElement` stamps complex-valued AC phasor terms through `AcCircuitEquationBuilder`.
+- `TransientCircuitElement` stamps fixed-step transient companion-model terms through `TransientCircuitEquationBuilder`.
 
 One element may implement more than one interface. For example, a closed relay can connect two contacts through
 topology and also stamp coil-side equations.
 
 `WireElement`, `ResistorElement`, and `VoltageSourceElement` are convenience API records. The solver does not
 special-case them; it consumes the generic topology and equation builder interfaces.
+
+`DiodeElement` is a convenience nonlinear DC element using the Shockley diode equation. `CapacitorElement` and
+`InductorElement` are convenience ideal reactive elements for AC phasor and fixed-step transient solves.
 
 Compiled example elements live under:
 
@@ -123,6 +128,45 @@ builder.addCurrentControlledCurrentSource(outputPositivePort, outputNegativePort
 The probe is an ideal 0V voltage source, not a passive observer. It changes the MNA system and must be placed
 where an ideal 0V series element is acceptable.
 
+## Nonlinear DC Stamps
+
+`NonlinearCircuitElement#stamp(NonlinearCircuitEquationBuilder builder)` supports Newton-Raphson nonlinear solves.
+The first nonlinear API shape is intentionally small: elements read their current Newton estimate voltage, then stamp
+a current and differential conductance at that point.
+
+For a two-terminal current `I = f(V)` flowing from positive to negative:
+
+```java
+double voltage = builder.voltage(positivePort, negativePort);
+double current = f(voltage);
+double conductance = derivativeAt(voltage);
+builder.addLinearizedCurrent(positivePort, negativePort, current, conductance);
+```
+
+Internally EMcore linearizes this as:
+
+```text
+I(V) ~= G * V + (I0 - G * V0)
+```
+
+where `V0` and `I0` are the current Newton estimate and `G = dI/dV`.
+
+The built-in `DiodeElement` stamps the Shockley model:
+
+```text
+I = Is * (exp(V / (n * Vt)) - 1)
+G = dI/dV
+```
+
+AC solves use the latest DC operating point as their small-signal bias point. When `acSnapshot(...)` or
+`sampleAcPort(...)` is requested, EMcore first refreshes the DC solve if needed. Nonlinear elements are then stamped
+into the AC system as their differential conductance `G = dI/dV` at that solved bias point. The DC equivalent current
+offset is not stamped into AC.
+
+The same nonlinear stamps are also included in transient steps, where they solve against the current time step's
+linear companion-model terms. This is still a circuit-level time-domain solve, not a field propagation or RF channel
+model.
+
 ## AC Phasor Stamps
 
 `AcLinearCircuitElement#stamp(AcCircuitEquationBuilder builder)` supports the same MNA shape as DC, but values
@@ -140,6 +184,7 @@ AC supported stamps:
 - independent voltage source: phasor `Vpositive - Vnegative`
 - VCCS, VCVS, CCCS, and CCVS with complex gains or transimpedance
 - current probe: a 0V ideal voltage source that exposes phasor branch current
+- nonlinear DC elements as real small-signal admittance at the current DC bias point
 
 Basic AC examples:
 
@@ -168,6 +213,57 @@ AcCircuitSnapshot snapshot = Electromagnetics.api().circuits().acSnapshot(level,
 Optional<AcCircuitSample> sample = Electromagnetics.api().circuits().sampleAcPort(level, port, 60.0);
 ```
 
+## Transient Stamps
+
+`TransientCircuitElement#stamp(TransientCircuitEquationBuilder builder)` supports fixed-step transient companion
+models. The first transient API surface covers ideal capacitors and inductors:
+
+```java
+builder.addCapacitance(positivePort, negativePort, capacitanceFarads);
+builder.addInductance(positivePort, negativePort, inductanceHenries);
+```
+
+The capacitor companion model uses backward Euler:
+
+```text
+G = C / dt
+Ieq = -G * Vprevious
+I(t) = G * V(t) + Ieq
+```
+
+The inductor companion model also uses backward Euler, stamped in Norton form:
+
+```text
+G = dt / L
+Ieq = Iprevious
+I(t) = G * V(t) + Ieq
+```
+
+`CapacitorElement` and `InductorElement` stamp these models automatically. Previous capacitor voltage and inductor
+current are stored internally by element id and stamp index, so re-registering an element with a different internal
+dynamic-element order should be treated as new dynamic state.
+
+Transient solves are requested explicitly:
+
+```java
+CircuitSnapshot snapshot = Electromagnetics.api().circuits().stepTransient(level, 1.0e-4);
+```
+
+`stepTransient(...)` returns the time-domain snapshot for that step. It does not replace `snapshot(...)`, which
+continues to mean DC operating point. Nonlinear elements participate in the same Newton-Raphson loop per time step;
+successful transient steps keep dynamic element state and node-voltage estimates for the next step. The current MVP
+uses fixed caller-supplied time steps and does not yet provide adaptive stepping.
+
+For in-game debugging, operators can advance transient solves manually:
+
+```text
+/emcore circuit transient step <dtSeconds> [steps]
+/emcore circuit transient probe <x y z> <dtSeconds> [steps]
+```
+
+The transient debug output reports the requested step size, number of steps, accumulated transient time, diagnostics,
+and per-port `V`, `I`, `P`, and nonzero stored energy `E`.
+
 ## Branch Current
 
 `CircuitBranchCurrent` identifies a current unknown introduced by a voltage-like branch:
@@ -189,7 +285,8 @@ referenced branch current is missing or duplicated, EMcore reports a diagnostic 
 - `voltageVolts`: solved node voltage for that port
 - `currentAmps`: sum of stamped current contributions associated with that exact port
 - `powerWatts`: sum of stamped power contributions associated with that exact port
-- `storedEnergyJoules` and `overloaded`: reserved for API compatibility; gameplay mods own energy state and ratings
+- `storedEnergyJoules`: transient capacitor or inductor energy when reported by `stepTransient(...)`
+- `overloaded`: reserved for API compatibility; gameplay mods own ratings and failure behavior
 
 `AcCircuitSample` is reported per exact port for AC:
 

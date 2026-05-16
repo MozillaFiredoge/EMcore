@@ -1,5 +1,6 @@
 package com.firedoge.emcore.internal.world;
 
+import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
@@ -13,7 +14,9 @@ import com.firedoge.emcore.api.circuit.CircuitTerminal;
 import com.firedoge.emcore.api.field.ElectricFieldSample;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
 import com.firedoge.emcore.api.signal.SignalSample;
+import com.firedoge.emcore.api.signal.SignalSource;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork;
+import com.firedoge.emcore.internal.signal.SignalNetwork;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
 import net.minecraft.resources.ResourceKey;
@@ -26,8 +29,10 @@ public final class EmWorldState {
 
     private final ResourceKey<Level> dimension;
     private final CircuitNetwork circuitNetwork = new CircuitNetwork();
+    private final SignalNetwork signalNetwork = new SignalNetwork();
     private long gameTicks;
     private double simulatedTimeSeconds;
+    private double transientTimeSeconds;
 
     public EmWorldState(ResourceKey<Level> dimension) {
         this.dimension = Objects.requireNonNull(dimension, "dimension");
@@ -80,6 +85,11 @@ public final class EmWorldState {
         return circuitNetwork.acSnapshot(frequencyHertz, simulatedTimeSeconds);
     }
 
+    public CircuitSnapshot stepTransientCircuit(double timeStepSeconds) {
+        transientTimeSeconds += timeStepSeconds;
+        return circuitNetwork.stepTransient(timeStepSeconds, transientTimeSeconds);
+    }
+
     public Optional<CircuitSample> samplePort(CircuitPort port) {
         return circuitNetwork.samplePort(port);
     }
@@ -112,9 +122,19 @@ public final class EmWorldState {
         circuitNetwork.unregisterElement(elementId);
     }
 
+    public void registerSignalSource(SignalSource source) {
+        signalNetwork.registerSource(source);
+    }
+
+    public void unregisterSignalSource(ResourceLocation sourceId) {
+        signalNetwork.unregisterSource(sourceId);
+    }
+
+    public List<SignalSource> signalSources() {
+        return signalNetwork.sources();
+    }
+
     public Optional<SignalSample> sampleSignal(ResourceLocation channelId, Vec3 receiverPosition) {
-        Objects.requireNonNull(channelId, "channelId");
-        Objects.requireNonNull(receiverPosition, "receiverPosition");
-        return Optional.empty();
+        return signalNetwork.sample(channelId, receiverPosition, simulatedTimeSeconds);
     }
 }

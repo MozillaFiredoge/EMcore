@@ -18,18 +18,26 @@ import com.firedoge.emcore.api.circuit.CircuitDiagnosticType;
 import com.firedoge.emcore.api.circuit.CircuitNode;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
+import com.firedoge.emcore.api.circuit.NonlinearCircuitEquationBuilder;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork.ConductanceStamp;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork.CurrentControlledCurrentSourceStamp;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork.CurrentControlledVoltageSourceStamp;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork.CurrentSourceStamp;
+import com.firedoge.emcore.internal.circuit.CircuitNetwork.NonlinearCurrentStamp;
+import com.firedoge.emcore.internal.circuit.CircuitNetwork.NonlinearElementStamp;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork.SolveResult;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork.SolveTopology;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork.VoltageControlledCurrentSourceStamp;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork.VoltageControlledVoltageSourceStamp;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork.VoltageSourceStamp;
+import net.minecraft.resources.ResourceLocation;
 
 final class MnaSolver {
     private static final double VOLTAGE_EPSILON = 1.0e-9;
+    private static final double NEWTON_ABSOLUTE_TOLERANCE = 1.0e-9;
+    private static final double NEWTON_RELATIVE_TOLERANCE = 1.0e-7;
+    private static final double NEWTON_MAX_NODE_STEP_VOLTS = 0.25;
+    private static final int NEWTON_MAX_ITERATIONS = 96;
     private static final int DENSE_SOLVER_WARNING_UNKNOWNS = 128;
 
     private MnaSolver() {
@@ -91,8 +99,6 @@ final class MnaSolver {
                 + component.currentControlledVoltageSources().size();
         warnIfDenseSolveIsLarge(component, unknownCount, diagnostics);
 
-        double[][] matrix = new double[unknownCount][unknownCount];
-        double[] rhs = new double[unknownCount];
         Map<CircuitBranchCurrent, Integer> branchCurrentColumns = branchCurrentColumns(
                 component,
                 voltageSourceOffset,
@@ -104,114 +110,28 @@ final class MnaSolver {
             return;
         }
 
-        for (ConductanceStamp conductance : component.conductances()) {
-            int positiveNode = topology.nodeOf(conductance.positivePort());
-            int negativeNode = topology.nodeOf(conductance.negativePort());
-            addConductance(matrix, nodeRows, positiveNode, negativeNode, conductance.conductanceSiemens());
-        }
-
-        for (int sourceIndex = 0; sourceIndex < component.voltageSources().size(); sourceIndex++) {
-            VoltageSourceStamp source = component.voltageSources().get(sourceIndex);
-            int positiveNode = topology.nodeOf(source.positivePort());
-            int negativeNode = topology.nodeOf(source.negativePort());
-            int sourceColumn = branchCurrentColumns.get(source.branchCurrent());
-
-            addVoltageSource(matrix, rhs, nodeRows, positiveNode, negativeNode, sourceColumn, source.voltageVolts());
-        }
-
-        for (int sourceIndex = 0; sourceIndex < component.voltageControlledVoltageSources().size(); sourceIndex++) {
-            VoltageControlledVoltageSourceStamp source = component.voltageControlledVoltageSources().get(sourceIndex);
-            int positiveNode = topology.nodeOf(source.positivePort());
-            int negativeNode = topology.nodeOf(source.negativePort());
-            int controlPositiveNode = topology.nodeOf(source.controlPositivePort());
-            int controlNegativeNode = topology.nodeOf(source.controlNegativePort());
-            int sourceColumn = branchCurrentColumns.get(source.branchCurrent());
-
-            addVoltageControlledVoltageSource(
-                    matrix,
-                    nodeRows,
-                    positiveNode,
-                    negativeNode,
-                    controlPositiveNode,
-                    controlNegativeNode,
-                    sourceColumn,
-                    source.gain()
-            );
-        }
-
-        for (int sourceIndex = 0; sourceIndex < component.currentControlledVoltageSources().size(); sourceIndex++) {
-            CurrentControlledVoltageSourceStamp source = component.currentControlledVoltageSources().get(sourceIndex);
-            int positiveNode = topology.nodeOf(source.positivePort());
-            int negativeNode = topology.nodeOf(source.negativePort());
-            int sourceColumn = branchCurrentColumns.get(source.branchCurrent());
-            Integer controlColumn = branchCurrentColumns.get(source.controlCurrent());
-            if (controlColumn == null) {
-                MnaBranchCurrentColumns.addMissingDiagnostic(diagnostics, source.controlCurrent(), "Branch current");
-                return;
-            }
-
-            addCurrentControlledVoltageSource(
-                    matrix,
-                    nodeRows,
-                    positiveNode,
-                    negativeNode,
-                    sourceColumn,
-                    controlColumn,
-                    source.transresistanceOhms()
-            );
-        }
-
-        for (CurrentSourceStamp currentSource : component.currentSources()) {
-            int positiveNode = topology.nodeOf(currentSource.positivePort());
-            int negativeNode = topology.nodeOf(currentSource.negativePort());
-            addCurrentSource(rhs, nodeRows, positiveNode, negativeNode, currentSource.currentAmps());
-        }
-        for (VoltageControlledCurrentSourceStamp currentSource : component.voltageControlledCurrentSources()) {
-            int positiveNode = topology.nodeOf(currentSource.positivePort());
-            int negativeNode = topology.nodeOf(currentSource.negativePort());
-            int controlPositiveNode = topology.nodeOf(currentSource.controlPositivePort());
-            int controlNegativeNode = topology.nodeOf(currentSource.controlNegativePort());
-
-            addVoltageControlledCurrentSource(
-                    matrix,
-                    nodeRows,
-                    positiveNode,
-                    negativeNode,
-                    controlPositiveNode,
-                    controlNegativeNode,
-                    currentSource.transconductanceSiemens()
-            );
-        }
-        for (CurrentControlledCurrentSourceStamp currentSource : component.currentControlledCurrentSources()) {
-            int positiveNode = topology.nodeOf(currentSource.positivePort());
-            int negativeNode = topology.nodeOf(currentSource.negativePort());
-            Integer controlColumn = branchCurrentColumns.get(currentSource.controlCurrent());
-            if (controlColumn == null) {
-                MnaBranchCurrentColumns.addMissingDiagnostic(diagnostics, currentSource.controlCurrent(), "Branch current");
-                return;
-            }
-
-            addCurrentControlledCurrentSource(
-                    matrix,
-                    nodeRows,
-                    positiveNode,
-                    negativeNode,
-                    controlColumn,
-                    currentSource.gain()
-            );
-        }
-
-        double[] solved = unknownCount == 0 ? new double[0] : DenseLinearSolver.solve(matrix, rhs);
-        if (solved == null) {
-            diagnostics.add(new CircuitDiagnostic(
-                    CircuitDiagnosticType.SOLVE_FAILED,
-                    CircuitDiagnosticSeverity.ERROR,
-                    List.of(),
-                    "Linear solve failed for circuit component with " + component.nodes().size() + " nodes"
-            ));
-            EMcore.LOGGER.warn("Circuit component solve failed; retaining zero samples for {} nodes", component.nodes().size());
+        SolvedComponent solvedComponent = component.nonlinearElements().isEmpty()
+                ? solveLinearComponent(
+                        topology,
+                        component,
+                        nodeRows,
+                        branchCurrentColumns,
+                        unknownCount,
+                        diagnostics
+                )
+                : solveNonlinearComponent(
+                        topology,
+                        component,
+                        nodeRows,
+                        branchCurrentColumns,
+                        unknownCount,
+                        initialEstimate(topology, nodeRows, unknownCount),
+                        diagnostics
+                );
+        if (solvedComponent == null) {
             return;
         }
+        double[] solved = solvedComponent.unknowns();
 
         for (Map.Entry<Integer, Integer> entry : nodeRows.entrySet()) {
             nodeVoltages[entry.getKey()] = solved[entry.getValue()];
@@ -298,6 +218,330 @@ final class MnaSolver {
             addPortContribution(mutableSamples, currentSource.positivePort(), nodeVoltages[positiveNode], current, power);
             addPortContribution(mutableSamples, currentSource.negativePort(), nodeVoltages[negativeNode], -current, power);
         }
+
+        for (NonlinearCurrentStamp nonlinearCurrent : solvedComponent.nonlinearCurrents()) {
+            int positiveNode = topology.nodeOf(nonlinearCurrent.positivePort());
+            int negativeNode = topology.nodeOf(nonlinearCurrent.negativePort());
+            double voltage = nodeVoltages[positiveNode] - nodeVoltages[negativeNode];
+            double current = nonlinearCurrent.currentAmps();
+            double power = voltage * current;
+
+            addPortContribution(mutableSamples, nonlinearCurrent.positivePort(), nodeVoltages[positiveNode], current, power);
+            addPortContribution(mutableSamples, nonlinearCurrent.negativePort(), nodeVoltages[negativeNode], -current, power);
+        }
+    }
+
+    private static SolvedComponent solveLinearComponent(
+            SolveTopology topology,
+            ComponentTopology component,
+            Map<Integer, Integer> nodeRows,
+            Map<CircuitBranchCurrent, Integer> branchCurrentColumns,
+            int unknownCount,
+            List<CircuitDiagnostic> diagnostics
+    ) {
+        LinearizedSystem system = buildLinearizedSystem(
+                topology,
+                component,
+                nodeRows,
+                branchCurrentColumns,
+                new double[unknownCount],
+                unknownCount,
+                diagnostics
+        );
+        if (system == null) {
+            return null;
+        }
+
+        double[] solved = solveDenseSystem(system.matrix(), system.rhs(), unknownCount, component, diagnostics, "Linear");
+        return solved == null ? null : new SolvedComponent(solved, List.of());
+    }
+
+    private static SolvedComponent solveNonlinearComponent(
+            SolveTopology topology,
+            ComponentTopology component,
+            Map<Integer, Integer> nodeRows,
+            Map<CircuitBranchCurrent, Integer> branchCurrentColumns,
+            int unknownCount,
+            double[] initialEstimate,
+            List<CircuitDiagnostic> diagnostics
+    ) {
+        double[] estimate = initialEstimate;
+
+        for (int iteration = 0; iteration < NEWTON_MAX_ITERATIONS; iteration++) {
+            LinearizedSystem system = buildLinearizedSystem(
+                    topology,
+                    component,
+                    nodeRows,
+                    branchCurrentColumns,
+                    estimate,
+                    unknownCount,
+                    diagnostics
+            );
+            if (system == null) {
+                return null;
+            }
+
+            double[] candidate = solveDenseSystem(
+                    system.matrix(),
+                    system.rhs(),
+                    unknownCount,
+                    component,
+                    diagnostics,
+                    "Newton linearization"
+            );
+            if (candidate == null) {
+                return null;
+            }
+
+            if (hasConverged(estimate, candidate)) {
+                LinearizedSystem finalSystem = buildLinearizedSystem(
+                        topology,
+                        component,
+                        nodeRows,
+                        branchCurrentColumns,
+                        candidate,
+                        unknownCount,
+                        diagnostics
+                );
+                return finalSystem == null
+                        ? null
+                        : new SolvedComponent(candidate, finalSystem.nonlinearCurrents());
+            }
+
+            estimate = dampNewtonStep(estimate, candidate, nodeRows.size());
+        }
+
+        diagnostics.add(new CircuitDiagnostic(
+                CircuitDiagnosticType.NONLINEAR_SOLVE_DID_NOT_CONVERGE,
+                CircuitDiagnosticSeverity.ERROR,
+                component.nonlinearPorts(),
+                "Newton-Raphson solve did not converge after " + NEWTON_MAX_ITERATIONS + " iterations"
+        ));
+        EMcore.LOGGER.warn(
+                "Nonlinear circuit component did not converge after {} iterations; retaining zero samples for {} nodes",
+                NEWTON_MAX_ITERATIONS,
+                component.nodes().size()
+        );
+        return null;
+    }
+
+    private static LinearizedSystem buildLinearizedSystem(
+            SolveTopology topology,
+            ComponentTopology component,
+            Map<Integer, Integer> nodeRows,
+            Map<CircuitBranchCurrent, Integer> branchCurrentColumns,
+            double[] estimate,
+            int unknownCount,
+            List<CircuitDiagnostic> diagnostics
+    ) {
+        double[][] matrix = new double[unknownCount][unknownCount];
+        double[] rhs = new double[unknownCount];
+
+        if (!stampLinearTerms(topology, component, nodeRows, branchCurrentColumns, matrix, rhs, diagnostics)) {
+            return null;
+        }
+
+        NonlinearEquationRecorder nonlinearRecorder = new NonlinearEquationRecorder(topology, nodeRows, estimate);
+        for (NonlinearElementStamp nonlinearElement : component.nonlinearElements()) {
+            nonlinearRecorder.record(nonlinearElement, diagnostics);
+        }
+        if (nonlinearRecorder.failed()) {
+            return null;
+        }
+
+        for (ConductanceStamp conductance : nonlinearRecorder.conductances()) {
+            int positiveNode = topology.nodeOf(conductance.positivePort());
+            int negativeNode = topology.nodeOf(conductance.negativePort());
+            addConductance(matrix, nodeRows, positiveNode, negativeNode, conductance.conductanceSiemens());
+        }
+        for (CurrentSourceStamp currentSource : nonlinearRecorder.currentSources()) {
+            int positiveNode = topology.nodeOf(currentSource.positivePort());
+            int negativeNode = topology.nodeOf(currentSource.negativePort());
+            addCurrentSource(rhs, nodeRows, positiveNode, negativeNode, currentSource.currentAmps());
+        }
+
+        return new LinearizedSystem(matrix, rhs, nonlinearRecorder.nonlinearCurrents());
+    }
+
+    private static boolean stampLinearTerms(
+            SolveTopology topology,
+            ComponentTopology component,
+            Map<Integer, Integer> nodeRows,
+            Map<CircuitBranchCurrent, Integer> branchCurrentColumns,
+            double[][] matrix,
+            double[] rhs,
+            List<CircuitDiagnostic> diagnostics
+    ) {
+        for (ConductanceStamp conductance : component.conductances()) {
+            int positiveNode = topology.nodeOf(conductance.positivePort());
+            int negativeNode = topology.nodeOf(conductance.negativePort());
+            addConductance(matrix, nodeRows, positiveNode, negativeNode, conductance.conductanceSiemens());
+        }
+
+        for (int sourceIndex = 0; sourceIndex < component.voltageSources().size(); sourceIndex++) {
+            VoltageSourceStamp source = component.voltageSources().get(sourceIndex);
+            int positiveNode = topology.nodeOf(source.positivePort());
+            int negativeNode = topology.nodeOf(source.negativePort());
+            int sourceColumn = branchCurrentColumns.get(source.branchCurrent());
+
+            addVoltageSource(matrix, rhs, nodeRows, positiveNode, negativeNode, sourceColumn, source.voltageVolts());
+        }
+
+        for (int sourceIndex = 0; sourceIndex < component.voltageControlledVoltageSources().size(); sourceIndex++) {
+            VoltageControlledVoltageSourceStamp source = component.voltageControlledVoltageSources().get(sourceIndex);
+            int positiveNode = topology.nodeOf(source.positivePort());
+            int negativeNode = topology.nodeOf(source.negativePort());
+            int controlPositiveNode = topology.nodeOf(source.controlPositivePort());
+            int controlNegativeNode = topology.nodeOf(source.controlNegativePort());
+            int sourceColumn = branchCurrentColumns.get(source.branchCurrent());
+
+            addVoltageControlledVoltageSource(
+                    matrix,
+                    nodeRows,
+                    positiveNode,
+                    negativeNode,
+                    controlPositiveNode,
+                    controlNegativeNode,
+                    sourceColumn,
+                    source.gain()
+            );
+        }
+
+        for (int sourceIndex = 0; sourceIndex < component.currentControlledVoltageSources().size(); sourceIndex++) {
+            CurrentControlledVoltageSourceStamp source = component.currentControlledVoltageSources().get(sourceIndex);
+            int positiveNode = topology.nodeOf(source.positivePort());
+            int negativeNode = topology.nodeOf(source.negativePort());
+            int sourceColumn = branchCurrentColumns.get(source.branchCurrent());
+            Integer controlColumn = branchCurrentColumns.get(source.controlCurrent());
+            if (controlColumn == null) {
+                MnaBranchCurrentColumns.addMissingDiagnostic(diagnostics, source.controlCurrent(), "Branch current");
+                return false;
+            }
+
+            addCurrentControlledVoltageSource(
+                    matrix,
+                    nodeRows,
+                    positiveNode,
+                    negativeNode,
+                    sourceColumn,
+                    controlColumn,
+                    source.transresistanceOhms()
+            );
+        }
+
+        for (CurrentSourceStamp currentSource : component.currentSources()) {
+            int positiveNode = topology.nodeOf(currentSource.positivePort());
+            int negativeNode = topology.nodeOf(currentSource.negativePort());
+            addCurrentSource(rhs, nodeRows, positiveNode, negativeNode, currentSource.currentAmps());
+        }
+        for (VoltageControlledCurrentSourceStamp currentSource : component.voltageControlledCurrentSources()) {
+            int positiveNode = topology.nodeOf(currentSource.positivePort());
+            int negativeNode = topology.nodeOf(currentSource.negativePort());
+            int controlPositiveNode = topology.nodeOf(currentSource.controlPositivePort());
+            int controlNegativeNode = topology.nodeOf(currentSource.controlNegativePort());
+
+            addVoltageControlledCurrentSource(
+                    matrix,
+                    nodeRows,
+                    positiveNode,
+                    negativeNode,
+                    controlPositiveNode,
+                    controlNegativeNode,
+                    currentSource.transconductanceSiemens()
+            );
+        }
+        for (CurrentControlledCurrentSourceStamp currentSource : component.currentControlledCurrentSources()) {
+            int positiveNode = topology.nodeOf(currentSource.positivePort());
+            int negativeNode = topology.nodeOf(currentSource.negativePort());
+            Integer controlColumn = branchCurrentColumns.get(currentSource.controlCurrent());
+            if (controlColumn == null) {
+                MnaBranchCurrentColumns.addMissingDiagnostic(diagnostics, currentSource.controlCurrent(), "Branch current");
+                return false;
+            }
+
+            addCurrentControlledCurrentSource(
+                    matrix,
+                    nodeRows,
+                    positiveNode,
+                    negativeNode,
+                    controlColumn,
+                    currentSource.gain()
+            );
+        }
+
+        return true;
+    }
+
+    private static double[] solveDenseSystem(
+            double[][] matrix,
+            double[] rhs,
+            int unknownCount,
+            ComponentTopology component,
+            List<CircuitDiagnostic> diagnostics,
+            String solveLabel
+    ) {
+        double[] solved = unknownCount == 0 ? new double[0] : DenseLinearSolver.solve(matrix, rhs);
+        if (solved != null) {
+            return solved;
+        }
+
+        diagnostics.add(new CircuitDiagnostic(
+                CircuitDiagnosticType.SOLVE_FAILED,
+                CircuitDiagnosticSeverity.ERROR,
+                component.allPorts(),
+                solveLabel + " solve failed for circuit component with " + component.nodes().size() + " nodes"
+        ));
+        EMcore.LOGGER.warn(
+                "{} circuit component solve failed; retaining zero samples for {} nodes",
+                solveLabel,
+                component.nodes().size()
+        );
+        return null;
+    }
+
+    private static boolean hasConverged(double[] previous, double[] candidate) {
+        for (int index = 0; index < previous.length; index++) {
+            double delta = Math.abs(candidate[index] - previous[index]);
+            double scale = Math.max(Math.abs(candidate[index]), Math.abs(previous[index]));
+            if (delta > NEWTON_ABSOLUTE_TOLERANCE + NEWTON_RELATIVE_TOLERANCE * scale) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static double[] dampNewtonStep(double[] previous, double[] candidate, int nodeUnknownCount) {
+        double maxNodeDelta = 0.0;
+        for (int index = 0; index < nodeUnknownCount; index++) {
+            maxNodeDelta = Math.max(maxNodeDelta, Math.abs(candidate[index] - previous[index]));
+        }
+
+        if (maxNodeDelta <= NEWTON_MAX_NODE_STEP_VOLTS) {
+            return candidate;
+        }
+
+        double alpha = NEWTON_MAX_NODE_STEP_VOLTS / maxNodeDelta;
+        double[] damped = new double[candidate.length];
+        for (int index = 0; index < candidate.length; index++) {
+            damped[index] = previous[index] + alpha * (candidate[index] - previous[index]);
+        }
+        return damped;
+    }
+
+    private static double[] initialEstimate(
+            SolveTopology topology,
+            Map<Integer, Integer> nodeRows,
+            int unknownCount
+    ) {
+        double[] estimate = new double[unknownCount];
+        double[] initialNodeVoltages = topology.initialNodeVoltages();
+        for (Map.Entry<Integer, Integer> entry : nodeRows.entrySet()) {
+            int node = entry.getKey();
+            if (node >= 0 && node < initialNodeVoltages.length) {
+                estimate[entry.getValue()] = initialNodeVoltages[node];
+            }
+        }
+        return estimate;
     }
 
     private static void warnIfDenseSolveIsLarge(
@@ -492,6 +736,9 @@ final class MnaSolver {
                     source.controlCurrent()
             );
         }
+        for (NonlinearElementStamp nonlinearElement : topology.nonlinearElements()) {
+            MnaTopologySupport.connectPorts(componentUnionFind, topology, nonlinearElement.ports());
+        }
 
         Map<Integer, Integer> componentIndexes = new LinkedHashMap<>();
         List<List<Integer>> nodesByComponent = new ArrayList<>();
@@ -517,6 +764,7 @@ final class MnaSolver {
         List<List<VoltageControlledVoltageSourceStamp>> voltageControlledVoltageSourcesByComponent = new ArrayList<>();
         List<List<CurrentControlledCurrentSourceStamp>> currentControlledCurrentSourcesByComponent = new ArrayList<>();
         List<List<CurrentControlledVoltageSourceStamp>> currentControlledVoltageSourcesByComponent = new ArrayList<>();
+        List<List<NonlinearElementStamp>> nonlinearElementsByComponent = new ArrayList<>();
         for (int index = 0; index < nodesByComponent.size(); index++) {
             conductancesByComponent.add(new ArrayList<>());
             currentSourcesByComponent.add(new ArrayList<>());
@@ -525,6 +773,7 @@ final class MnaSolver {
             voltageControlledVoltageSourcesByComponent.add(new ArrayList<>());
             currentControlledCurrentSourcesByComponent.add(new ArrayList<>());
             currentControlledVoltageSourcesByComponent.add(new ArrayList<>());
+            nonlinearElementsByComponent.add(new ArrayList<>());
         }
 
         for (ConductanceStamp conductance : topology.conductances()) {
@@ -556,6 +805,13 @@ final class MnaSolver {
                     .get(componentByNode[topology.nodeOf(source.positivePort())])
                     .add(source);
         }
+        for (NonlinearElementStamp nonlinearElement : topology.nonlinearElements()) {
+            if (!nonlinearElement.ports().isEmpty()) {
+                nonlinearElementsByComponent
+                        .get(componentByNode[topology.nodeOf(nonlinearElement.ports().getFirst())])
+                        .add(nonlinearElement);
+            }
+        }
 
         List<ComponentTopology> components = new ArrayList<>();
         for (int index = 0; index < nodesByComponent.size(); index++) {
@@ -567,7 +823,8 @@ final class MnaSolver {
                     List.copyOf(voltageControlledCurrentSourcesByComponent.get(index)),
                     List.copyOf(voltageControlledVoltageSourcesByComponent.get(index)),
                     List.copyOf(currentControlledCurrentSourcesByComponent.get(index)),
-                    List.copyOf(currentControlledVoltageSourcesByComponent.get(index))
+                    List.copyOf(currentControlledVoltageSourcesByComponent.get(index)),
+                    List.copyOf(nonlinearElementsByComponent.get(index))
             ));
         }
         return components;
@@ -785,11 +1042,213 @@ final class MnaSolver {
             List<VoltageControlledCurrentSourceStamp> voltageControlledCurrentSources,
             List<VoltageControlledVoltageSourceStamp> voltageControlledVoltageSources,
             List<CurrentControlledCurrentSourceStamp> currentControlledCurrentSources,
-            List<CurrentControlledVoltageSourceStamp> currentControlledVoltageSources
+            List<CurrentControlledVoltageSourceStamp> currentControlledVoltageSources,
+            List<NonlinearElementStamp> nonlinearElements
+    ) {
+        private List<CircuitPort> nonlinearPorts() {
+            List<CircuitPort> ports = new ArrayList<>();
+            for (NonlinearElementStamp nonlinearElement : nonlinearElements) {
+                ports.addAll(nonlinearElement.ports());
+            }
+            return List.copyOf(ports);
+        }
+
+        private List<CircuitPort> allPorts() {
+            List<CircuitPort> ports = new ArrayList<>();
+            conductances.forEach(stamp -> addPorts(ports, stamp.positivePort(), stamp.negativePort()));
+            currentSources.forEach(stamp -> addPorts(ports, stamp.positivePort(), stamp.negativePort()));
+            voltageSources.forEach(stamp -> addPorts(ports, stamp.positivePort(), stamp.negativePort()));
+            voltageControlledCurrentSources.forEach(stamp -> addPorts(
+                    ports,
+                    stamp.positivePort(),
+                    stamp.negativePort(),
+                    stamp.controlPositivePort(),
+                    stamp.controlNegativePort()
+            ));
+            voltageControlledVoltageSources.forEach(stamp -> addPorts(
+                    ports,
+                    stamp.positivePort(),
+                    stamp.negativePort(),
+                    stamp.controlPositivePort(),
+                    stamp.controlNegativePort()
+            ));
+            currentControlledCurrentSources.forEach(stamp -> addPorts(ports, stamp.positivePort(), stamp.negativePort()));
+            currentControlledVoltageSources.forEach(stamp -> addPorts(ports, stamp.positivePort(), stamp.negativePort()));
+            nonlinearElements.forEach(stamp -> ports.addAll(stamp.ports()));
+            return List.copyOf(ports);
+        }
+
+        private static void addPorts(List<CircuitPort> ports, CircuitPort... addedPorts) {
+            ports.addAll(List.of(addedPorts));
+        }
+    }
+
+    private record LinearizedSystem(
+            double[][] matrix,
+            double[] rhs,
+            List<NonlinearCurrentStamp> nonlinearCurrents
+    ) {
+    }
+
+    private record SolvedComponent(
+            double[] unknowns,
+            List<NonlinearCurrentStamp> nonlinearCurrents
     ) {
     }
 
     private record VoltageConstraint(int node, double deltaVolts, VoltageSourceStamp source) {
+    }
+
+    private static final class NonlinearEquationRecorder implements NonlinearCircuitEquationBuilder {
+        private final SolveTopology topology;
+        private final Map<Integer, Integer> nodeRows;
+        private final double[] estimate;
+        private final List<ConductanceStamp> conductances = new ArrayList<>();
+        private final List<CurrentSourceStamp> currentSources = new ArrayList<>();
+        private final List<NonlinearCurrentStamp> nonlinearCurrents = new ArrayList<>();
+        private ResourceLocation elementId;
+        private List<CircuitPort> elementPorts = List.of();
+        private boolean failed;
+
+        private NonlinearEquationRecorder(
+                SolveTopology topology,
+                Map<Integer, Integer> nodeRows,
+                double[] estimate
+        ) {
+            this.topology = topology;
+            this.nodeRows = nodeRows;
+            this.estimate = estimate;
+        }
+
+        private void record(NonlinearElementStamp nonlinearElement, List<CircuitDiagnostic> diagnostics) {
+            ResourceLocation previousElementId = elementId;
+            List<CircuitPort> previousElementPorts = elementPorts;
+            elementId = nonlinearElement.id();
+            elementPorts = nonlinearElement.ports();
+            int conductanceSize = conductances.size();
+            int currentSourceSize = currentSources.size();
+            int nonlinearCurrentSize = nonlinearCurrents.size();
+
+            try {
+                nonlinearElement.element().stamp(this);
+            } catch (RuntimeException exception) {
+                trim(conductances, conductanceSize);
+                trim(currentSources, currentSourceSize);
+                trim(nonlinearCurrents, nonlinearCurrentSize);
+                diagnostics.add(new CircuitDiagnostic(
+                        CircuitDiagnosticType.ELEMENT_STAMP_FAILED,
+                        CircuitDiagnosticSeverity.ERROR,
+                        nonlinearElement.ports(),
+                        stampFailureMessage(nonlinearElement, exception)
+                ));
+                EMcore.LOGGER.warn(
+                        "Nonlinear circuit element {} failed while stamping equations",
+                        nonlinearElement.id(),
+                        exception
+                );
+                failed = true;
+            } finally {
+                elementId = previousElementId;
+                elementPorts = previousElementPorts;
+            }
+        }
+
+        @Override
+        public double voltage(CircuitPort positivePort, CircuitPort negativePort) {
+            CircuitPort checkedPositivePort = requirePort(positivePort, "positivePort");
+            CircuitPort checkedNegativePort = requirePort(negativePort, "negativePort");
+            return nodeVoltage(topology.nodeOf(checkedPositivePort)) - nodeVoltage(topology.nodeOf(checkedNegativePort));
+        }
+
+        @Override
+        public void addLinearizedCurrent(
+                CircuitPort positivePort,
+                CircuitPort negativePort,
+                double currentAmps,
+                double conductanceSiemens
+        ) {
+            requireFinite(currentAmps, "currentAmps");
+            requireFinite(conductanceSiemens, "conductanceSiemens");
+
+            CircuitPort checkedPositivePort = requirePort(positivePort, "positivePort");
+            CircuitPort checkedNegativePort = requirePort(negativePort, "negativePort");
+            double operatingVoltage = voltage(checkedPositivePort, checkedNegativePort);
+            double equivalentCurrentAmps = currentAmps - conductanceSiemens * operatingVoltage;
+
+            if (conductanceSiemens != 0.0) {
+                conductances.add(new ConductanceStamp(
+                        elementId,
+                        checkedPositivePort,
+                        checkedNegativePort,
+                        conductanceSiemens
+                ));
+            }
+            if (equivalentCurrentAmps != 0.0) {
+                currentSources.add(new CurrentSourceStamp(
+                        elementId,
+                        checkedPositivePort,
+                        checkedNegativePort,
+                        equivalentCurrentAmps
+                ));
+            }
+            nonlinearCurrents.add(new NonlinearCurrentStamp(
+                    elementId,
+                    checkedPositivePort,
+                    checkedNegativePort,
+                    currentAmps,
+                    conductanceSiemens
+            ));
+        }
+
+        private List<ConductanceStamp> conductances() {
+            return List.copyOf(conductances);
+        }
+
+        private List<CurrentSourceStamp> currentSources() {
+            return List.copyOf(currentSources);
+        }
+
+        private List<NonlinearCurrentStamp> nonlinearCurrents() {
+            return List.copyOf(nonlinearCurrents);
+        }
+
+        private boolean failed() {
+            return failed;
+        }
+
+        private double nodeVoltage(int node) {
+            int row = rowOf(nodeRows, node);
+            return row < 0 ? 0.0 : estimate[row];
+        }
+
+        private CircuitPort requirePort(CircuitPort port, String name) {
+            CircuitPort checkedPort = java.util.Objects.requireNonNull(port, name);
+            if (!elementPorts.contains(checkedPort)) {
+                throw new IllegalArgumentException("Nonlinear stamped port was not returned by ports(): " + checkedPort);
+            }
+            topology.nodeOf(checkedPort);
+            return checkedPort;
+        }
+
+        private static void requireFinite(double value, String name) {
+            if (!Double.isFinite(value)) {
+                throw new IllegalArgumentException(name + " must be finite");
+            }
+        }
+
+        private static String stampFailureMessage(NonlinearElementStamp element, RuntimeException exception) {
+            String detail = exception.getMessage();
+            if (detail == null || detail.isBlank()) {
+                return "Element " + element.id() + " failed while stamping nonlinear equations";
+            }
+            return "Element " + element.id() + " failed while stamping nonlinear equations: " + detail;
+        }
+
+        private static <T> void trim(List<T> values, int size) {
+            while (values.size() > size) {
+                values.removeLast();
+            }
+        }
     }
 
     private static final class MutableSample {

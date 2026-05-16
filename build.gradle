@@ -196,12 +196,21 @@ tasks.register('circuitSmokeTest', JavaExec) {
     dependsOn tasks.named('testClasses')
 }
 
+tasks.register('signalSmokeTest', JavaExec) {
+    group = 'verification'
+    description = 'Runs dependency-free signal network smoke tests.'
+    classpath = sourceSets.test.runtimeClasspath
+    mainClass = 'com.firedoge.emcore.internal.signal.SignalNetworkSmokeTest'
+    dependsOn tasks.named('testClasses')
+}
+
 tasks.named('test', Test) {
     failOnNoDiscoveredTests = false
 }
 
 tasks.named('check') {
     dependsOn tasks.named('circuitSmokeTest')
+    dependsOn tasks.named('signalSmokeTest')
 }
 
 // IDEA no longer automatically downloads sources/javadoc jars for dependencies, so we need to explicitly enable the behavior.

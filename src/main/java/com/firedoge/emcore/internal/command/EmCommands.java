@@ -12,6 +12,8 @@ import com.firedoge.emcore.api.circuit.VoltageSourceElement;
 import com.firedoge.emcore.api.circuit.WireElement;
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.CommandDispatcher;
+import com.mojang.brigadier.arguments.DoubleArgumentType;
+import com.mojang.brigadier.arguments.IntegerArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -37,6 +39,7 @@ public final class EmCommands {
     private static final double TEST_VOLTAGE_VOLTS = 12.0;
     private static final double CONFLICT_TEST_VOLTAGE_VOLTS = 5.0;
     private static final double TEST_RESISTANCE_OHMS = 6.0;
+    private static final int MAX_TRANSIENT_DEBUG_STEPS = 10_000;
     private static final ResourceLocation TEST_OWNER = ResourceLocation.fromNamespaceAndPath(EMcore.MODID, "debug_test");
 
     private final Map<ResourceKey<Level>, TestCircuit> testCircuits = new HashMap<>();
@@ -55,6 +58,24 @@ public final class EmCommands {
                         .then(Commands.literal("probe")
                                 .then(Commands.argument("pos", BlockPosArgument.blockPos())
                                         .executes(EmCommands::probeCircuit)))
+                        .then(Commands.literal("transient")
+                                .then(Commands.literal("step")
+                                        .then(Commands.argument("dtSeconds", DoubleArgumentType.doubleArg(Double.MIN_VALUE))
+                                                .executes(context -> stepTransientCircuit(context, 1))
+                                                .then(Commands.argument("steps", IntegerArgumentType.integer(1, MAX_TRANSIENT_DEBUG_STEPS))
+                                                        .executes(context -> stepTransientCircuit(
+                                                                context,
+                                                                IntegerArgumentType.getInteger(context, "steps")
+                                                        )))))
+                                .then(Commands.literal("probe")
+                                        .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                                                .then(Commands.argument("dtSeconds", DoubleArgumentType.doubleArg(Double.MIN_VALUE))
+                                                        .executes(context -> probeTransientCircuit(context, 1))
+                                                        .then(Commands.argument("steps", IntegerArgumentType.integer(1, MAX_TRANSIENT_DEBUG_STEPS))
+                                                                .executes(context -> probeTransientCircuit(
+                                                                        context,
+                                                                        IntegerArgumentType.getInteger(context, "steps")
+                                                                )))))))
                         .then(Commands.literal("test")
                                 .then(Commands.literal("create")
                                         .then(Commands.argument("pos", BlockPosArgument.blockPos())
@@ -191,6 +212,92 @@ public final class EmCommands {
         return matches;
     }
 
+    private static int stepTransientCircuit(CommandContext<CommandSourceStack> context, int steps) {
+        ServerLevel level = context.getSource().getLevel();
+        double timeStepSeconds = DoubleArgumentType.getDouble(context, "dtSeconds");
+        CircuitSnapshot snapshot = runTransientSteps(level, timeStepSeconds, steps);
+
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "EMcore transient %s: dt=%s s, steps=%d, nodes=%d, ports=%d, terminals=%d, elements=%d, diagnostics=%d, samples=%d, t=%s s",
+                level.dimension().location(),
+                format(timeStepSeconds),
+                steps,
+                snapshot.nodes().size(),
+                snapshot.ports().size(),
+                snapshot.terminals().size(),
+                snapshot.elements().size(),
+                snapshot.diagnostics().size(),
+                snapshot.samples().size(),
+                format(snapshot.simulatedTimeSeconds())
+        )).withStyle(ChatFormatting.LIGHT_PURPLE), false);
+
+        if (!snapshot.diagnostics().isEmpty()) {
+            context.getSource().sendSuccess(() -> Component.literal(
+                    "Diagnostics: " + snapshot.diagnostics().size()).withStyle(ChatFormatting.RED), false);
+            for (CircuitDiagnostic diagnostic : snapshot.diagnostics()) {
+                context.getSource().sendSuccess(() -> describeDiagnostic(diagnostic), false);
+            }
+        }
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int probeTransientCircuit(CommandContext<CommandSourceStack> context, int steps) {
+        ServerLevel level = context.getSource().getLevel();
+        BlockPos position = BlockPosArgument.getBlockPos(context, "pos");
+        double timeStepSeconds = DoubleArgumentType.getDouble(context, "dtSeconds");
+        CircuitSnapshot snapshot = runTransientSteps(level, timeStepSeconds, steps);
+        Map<CircuitPort, CircuitSample> samples = samplesByPort(snapshot);
+
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "EMcore transient probe %s: dt=%s s, steps=%d, t=%s s",
+                format(position),
+                format(timeStepSeconds),
+                steps,
+                format(snapshot.simulatedTimeSeconds())
+        )).withStyle(ChatFormatting.LIGHT_PURPLE), false);
+
+        int matches = 0;
+        for (CircuitPort port : snapshot.ports()) {
+            if (!port.position().equals(position)) {
+                continue;
+            }
+
+            matches++;
+            CircuitSample sample = samples.get(port);
+            context.getSource().sendSuccess(() -> describePort(port, sample), false);
+        }
+
+        if (!snapshot.diagnostics().isEmpty()) {
+            context.getSource().sendSuccess(() -> Component.literal(
+                    "Diagnostics: " + snapshot.diagnostics().size()).withStyle(ChatFormatting.RED), false);
+            for (CircuitDiagnostic diagnostic : snapshot.diagnostics()) {
+                context.getSource().sendSuccess(() -> describeDiagnostic(diagnostic), false);
+            }
+        }
+
+        if (matches == 0) {
+            context.getSource().sendSuccess(() -> Component.literal("No EMcore transient circuit ports at "
+                    + format(position)).withStyle(ChatFormatting.YELLOW), false);
+        }
+
+        return matches;
+    }
+
+    private static CircuitSnapshot runTransientSteps(ServerLevel level, double timeStepSeconds, int steps) {
+        CircuitSnapshot snapshot = null;
+        CircuitAccess circuits = Electromagnetics.api().circuits();
+        for (int step = 0; step < steps; step++) {
+            snapshot = circuits.stepTransient(level, timeStepSeconds);
+        }
+        if (snapshot == null) {
+            throw new IllegalArgumentException("steps must be greater than zero");
+        }
+        return snapshot;
+    }
+
     private int createTestCircuit(CommandContext<CommandSourceStack> context) {
         ServerLevel level = context.getSource().getLevel();
         BlockPos base = BlockPosArgument.getBlockPos(context, "pos");
@@ -292,7 +399,11 @@ public final class EmCommands {
         return component
                 .append(Component.literal(" V=" + format(sample.voltageVolts()) + "V").withStyle(ChatFormatting.AQUA))
                 .append(Component.literal(" I=" + format(sample.currentAmps()) + "A").withStyle(ChatFormatting.GREEN))
-                .append(Component.literal(" P=" + format(sample.powerWatts()) + "W").withStyle(ChatFormatting.GOLD));
+                .append(Component.literal(" P=" + format(sample.powerWatts()) + "W").withStyle(ChatFormatting.GOLD))
+                .append(sample.storedEnergyJoules() == 0.0
+                        ? Component.empty()
+                        : Component.literal(" E=" + format(sample.storedEnergyJoules()) + "J")
+                                .withStyle(ChatFormatting.LIGHT_PURPLE));
     }
 
     private static MutableComponent describeDiagnostic(CircuitDiagnostic diagnostic) {

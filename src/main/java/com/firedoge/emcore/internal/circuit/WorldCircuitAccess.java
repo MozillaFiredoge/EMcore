@@ -65,6 +65,11 @@ public final class WorldCircuitAccess implements CircuitAccess {
     }
 
     @Override
+    public CircuitSnapshot stepTransient(ServerLevel level, double timeStepSeconds) {
+        return worldManager.getOrCreate(level).stepTransientCircuit(timeStepSeconds);
+    }
+
+    @Override
     public Optional<CircuitSample> samplePort(ServerLevel level, CircuitPort port) {
         return worldManager.getOrCreate(level).samplePort(port);
     }

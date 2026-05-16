@@ -8,6 +8,7 @@ import com.firedoge.emcore.api.circuit.AcCircuitEquationBuilder;
 import com.firedoge.emcore.api.circuit.AcCircuitSample;
 import com.firedoge.emcore.api.circuit.AcCircuitSnapshot;
 import com.firedoge.emcore.api.circuit.AcLinearCircuitElement;
+import com.firedoge.emcore.api.circuit.CapacitorElement;
 import com.firedoge.emcore.api.circuit.CircuitBranchCurrent;
 import com.firedoge.emcore.api.circuit.CircuitEquationBuilder;
 import com.firedoge.emcore.api.circuit.CircuitDiagnosticType;
@@ -17,6 +18,8 @@ import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
 import com.firedoge.emcore.api.circuit.CircuitTopologyBuilder;
 import com.firedoge.emcore.api.circuit.CircuitTopologyElement;
+import com.firedoge.emcore.api.circuit.DiodeElement;
+import com.firedoge.emcore.api.circuit.InductorElement;
 import com.firedoge.emcore.api.circuit.LinearCircuitElement;
 import com.firedoge.emcore.api.circuit.ResistorElement;
 import com.firedoge.emcore.api.circuit.VoltageSourceElement;
@@ -34,6 +37,12 @@ public final class CircuitNetworkSmokeTest {
 
     public static void main(String[] args) {
         solvesSourceResistorLoop();
+        stepsTransientRcChargingCircuit();
+        stepsTransientRlEnergizingCircuit();
+        stepsTransientDiodeCapacitorChargingCircuit();
+        solvesForwardBiasedDiodeOperatingPoint();
+        solvesReverseBiasedDiodeLeakage();
+        linearizesForwardBiasedDiodeForAcSmallSignal();
         reportsShortedVoltageSource();
         reportsConflictingVoltageSources();
         solvesHealthyComponentWhenAnotherComponentIsInvalid();
@@ -66,6 +75,226 @@ public final class CircuitNetworkSmokeTest {
         assertClose(0.0, samples.get(loop.sourceNegative()).voltageVolts(), "source negative voltage");
         assertClose(2.0, Math.abs(samples.get(loop.resistorPositive()).currentAmps()), "resistor current");
         assertClose(24.0, Math.abs(samples.get(loop.resistorPositive()).powerWatts()), "resistor power");
+    }
+
+    private static void stepsTransientRcChargingCircuit() {
+        CircuitNetwork network = new CircuitNetwork();
+        CircuitPort sourcePositive = port("transient_rc/source_positive", new BlockPos(0, 0, 0));
+        CircuitPort sourceNegative = port("transient_rc/source_negative", new BlockPos(1, 0, 0));
+        CircuitPort resistorPositive = port("transient_rc/resistor_positive", new BlockPos(0, 0, 1));
+        CircuitPort resistorNegative = port("transient_rc/resistor_negative", new BlockPos(1, 0, 1));
+        CircuitPort capacitorPositive = port("transient_rc/capacitor_positive", new BlockPos(0, 0, 2));
+        CircuitPort capacitorNegative = port("transient_rc/capacitor_negative", new BlockPos(1, 0, 2));
+
+        network.registerElement(new VoltageSourceElement(id("transient_rc/source"), sourcePositive, sourceNegative, 10.0));
+        network.registerElement(new ResistorElement(id("transient_rc/resistor"), resistorPositive, resistorNegative, 1_000.0));
+        network.registerElement(new CapacitorElement(id("transient_rc/capacitor"), capacitorPositive, capacitorNegative, 1.0e-6));
+        network.registerElement(new TestIdealLinkElement(id("transient_rc/source_link"), sourcePositive, resistorPositive));
+        network.registerElement(new TestIdealLinkElement(id("transient_rc/capacitor_link"), resistorNegative, capacitorPositive));
+        network.registerElement(new TestIdealLinkElement(id("transient_rc/ground_link"), capacitorNegative, sourceNegative));
+
+        CircuitSnapshot firstStep = network.stepTransient(0.001, 0.001);
+        Map<CircuitPort, CircuitSample> firstSamples = samplesByPort(firstStep);
+        CircuitSnapshot secondStep = network.stepTransient(0.001, 0.002);
+        Map<CircuitPort, CircuitSample> secondSamples = samplesByPort(secondStep);
+
+        assertEquals(0, firstStep.diagnostics().size(), "transient RC first-step diagnostics");
+        assertEquals(0, secondStep.diagnostics().size(), "transient RC second-step diagnostics");
+        assertClose(5.0, firstSamples.get(capacitorPositive).voltageVolts(), "transient RC first-step capacitor voltage");
+        assertClose(7.5, secondSamples.get(capacitorPositive).voltageVolts(), "transient RC second-step capacitor voltage");
+        assertClose(12.5e-6, firstSamples.get(capacitorPositive).storedEnergyJoules(), "transient RC first-step stored energy");
+        assertClose(28.125e-6, secondSamples.get(capacitorPositive).storedEnergyJoules(), "transient RC second-step stored energy");
+    }
+
+    private static void stepsTransientRlEnergizingCircuit() {
+        CircuitNetwork network = new CircuitNetwork();
+        CircuitPort sourcePositive = port("transient_rl/source_positive", new BlockPos(0, 0, 0));
+        CircuitPort sourceNegative = port("transient_rl/source_negative", new BlockPos(1, 0, 0));
+        CircuitPort resistorPositive = port("transient_rl/resistor_positive", new BlockPos(0, 0, 1));
+        CircuitPort resistorNegative = port("transient_rl/resistor_negative", new BlockPos(1, 0, 1));
+        CircuitPort inductorPositive = port("transient_rl/inductor_positive", new BlockPos(0, 0, 2));
+        CircuitPort inductorNegative = port("transient_rl/inductor_negative", new BlockPos(1, 0, 2));
+
+        network.registerElement(new VoltageSourceElement(id("transient_rl/source"), sourcePositive, sourceNegative, 10.0));
+        network.registerElement(new ResistorElement(id("transient_rl/resistor"), resistorPositive, resistorNegative, 1.0));
+        network.registerElement(new InductorElement(id("transient_rl/inductor"), inductorPositive, inductorNegative, 1.0));
+        network.registerElement(new TestIdealLinkElement(id("transient_rl/source_link"), sourcePositive, resistorPositive));
+        network.registerElement(new TestIdealLinkElement(id("transient_rl/inductor_link"), resistorNegative, inductorPositive));
+        network.registerElement(new TestIdealLinkElement(id("transient_rl/ground_link"), inductorNegative, sourceNegative));
+
+        CircuitSnapshot firstStep = network.stepTransient(0.5, 0.5);
+        Map<CircuitPort, CircuitSample> firstSamples = samplesByPort(firstStep);
+        CircuitSnapshot secondStep = network.stepTransient(0.5, 1.0);
+        Map<CircuitPort, CircuitSample> secondSamples = samplesByPort(secondStep);
+
+        assertEquals(0, firstStep.diagnostics().size(), "transient RL first-step diagnostics");
+        assertEquals(0, secondStep.diagnostics().size(), "transient RL second-step diagnostics");
+        assertClose(20.0 / 3.0, firstSamples.get(inductorPositive).voltageVolts(), "transient RL first-step inductor voltage");
+        assertClose(10.0 / 3.0, firstSamples.get(inductorPositive).currentAmps(), "transient RL first-step inductor current");
+        assertClose(40.0 / 9.0, secondSamples.get(inductorPositive).voltageVolts(), "transient RL second-step inductor voltage");
+        assertClose(50.0 / 9.0, secondSamples.get(inductorPositive).currentAmps(), "transient RL second-step inductor current");
+        assertClose(50.0 / 9.0, firstSamples.get(inductorPositive).storedEnergyJoules(), "transient RL first-step stored energy");
+        assertClose(1_250.0 / 81.0, secondSamples.get(inductorPositive).storedEnergyJoules(), "transient RL second-step stored energy");
+    }
+
+    private static void stepsTransientDiodeCapacitorChargingCircuit() {
+        CircuitNetwork network = new CircuitNetwork();
+        CircuitPort sourcePositive = port("transient_diode_cap/source_positive", new BlockPos(0, 0, 0));
+        CircuitPort sourceNegative = port("transient_diode_cap/source_negative", new BlockPos(1, 0, 0));
+        CircuitPort diodeAnode = port("transient_diode_cap/anode", new BlockPos(0, 0, 1));
+        CircuitPort diodeCathode = port("transient_diode_cap/cathode", new BlockPos(1, 0, 1));
+        CircuitPort capacitorPositive = port("transient_diode_cap/capacitor_positive", new BlockPos(0, 0, 2));
+        CircuitPort capacitorNegative = port("transient_diode_cap/capacitor_negative", new BlockPos(1, 0, 2));
+
+        network.registerElement(new VoltageSourceElement(
+                id("transient_diode_cap/source"),
+                sourcePositive,
+                sourceNegative,
+                1.0
+        ));
+        network.registerElement(new DiodeElement(id("transient_diode_cap/diode"), diodeAnode, diodeCathode));
+        network.registerElement(new CapacitorElement(
+                id("transient_diode_cap/capacitor"),
+                capacitorPositive,
+                capacitorNegative,
+                1.0e-6
+        ));
+        network.registerElement(new TestIdealLinkElement(id("transient_diode_cap/anode_link"), sourcePositive, diodeAnode));
+        network.registerElement(new TestIdealLinkElement(
+                id("transient_diode_cap/cathode_link"),
+                diodeCathode,
+                capacitorPositive
+        ));
+        network.registerElement(new TestIdealLinkElement(
+                id("transient_diode_cap/ground_link"),
+                capacitorNegative,
+                sourceNegative
+        ));
+
+        CircuitSnapshot firstStep = network.stepTransient(0.001, 0.001);
+        Map<CircuitPort, CircuitSample> firstSamples = samplesByPort(firstStep);
+        CircuitSnapshot secondStep = network.stepTransient(0.001, 0.002);
+        Map<CircuitPort, CircuitSample> secondSamples = samplesByPort(secondStep);
+        double firstCapacitorVoltage = firstSamples.get(capacitorPositive).voltageVolts();
+        double secondCapacitorVoltage = secondSamples.get(capacitorPositive).voltageVolts();
+        double firstDiodeVoltage = firstSamples.get(diodeAnode).voltageVolts()
+                - firstSamples.get(diodeCathode).voltageVolts();
+        double secondDiodeVoltage = secondSamples.get(diodeAnode).voltageVolts()
+                - secondSamples.get(diodeCathode).voltageVolts();
+
+        assertEquals(0, firstStep.diagnostics().size(), "transient diode-capacitor first-step diagnostics");
+        assertEquals(0, secondStep.diagnostics().size(), "transient diode-capacitor second-step diagnostics");
+        assertBetween(0.45, 0.55, firstCapacitorVoltage, "transient diode-capacitor first-step capacitor voltage");
+        assertBetween(0.50, 0.60, secondCapacitorVoltage, "transient diode-capacitor second-step capacitor voltage");
+        assertBetween(0.48, 0.56, firstDiodeVoltage, "transient diode-capacitor first-step diode voltage");
+        assertBetween(0.42, 0.52, secondDiodeVoltage, "transient diode-capacitor second-step diode voltage");
+        assertBetween(
+                firstCapacitorVoltage,
+                0.60,
+                secondCapacitorVoltage,
+                "transient diode-capacitor capacitor voltage should increase"
+        );
+        assertBetween(
+                firstSamples.get(capacitorPositive).storedEnergyJoules(),
+                1.8e-7,
+                secondSamples.get(capacitorPositive).storedEnergyJoules(),
+                "transient diode-capacitor stored energy should increase"
+        );
+    }
+
+    private static void solvesForwardBiasedDiodeOperatingPoint() {
+        CircuitNetwork network = new CircuitNetwork();
+        CircuitPort sourcePositive = port("diode_forward/source_positive", new BlockPos(0, 0, 0));
+        CircuitPort sourceNegative = port("diode_forward/source_negative", new BlockPos(1, 0, 0));
+        CircuitPort resistorPositive = port("diode_forward/resistor_positive", new BlockPos(0, 0, 1));
+        CircuitPort resistorNegative = port("diode_forward/resistor_negative", new BlockPos(1, 0, 1));
+        CircuitPort diodeAnode = port("diode_forward/anode", new BlockPos(0, 0, 2));
+        CircuitPort diodeCathode = port("diode_forward/cathode", new BlockPos(1, 0, 2));
+
+        network.registerElement(new VoltageSourceElement(id("diode_forward/source"), sourcePositive, sourceNegative, 1.0));
+        network.registerElement(new ResistorElement(id("diode_forward/resistor"), resistorPositive, resistorNegative, 1_000.0));
+        network.registerElement(new DiodeElement(id("diode_forward/diode"), diodeAnode, diodeCathode));
+        network.registerElement(new TestIdealLinkElement(id("diode_forward/source_link"), sourcePositive, resistorPositive));
+        network.registerElement(new TestIdealLinkElement(id("diode_forward/anode_link"), resistorNegative, diodeAnode));
+        network.registerElement(new TestIdealLinkElement(id("diode_forward/cathode_link"), diodeCathode, sourceNegative));
+
+        CircuitSnapshot snapshot = network.snapshot(0.0);
+        Map<CircuitPort, CircuitSample> samples = samplesByPort(snapshot);
+        double diodeVoltage = samples.get(diodeAnode).voltageVolts() - samples.get(diodeCathode).voltageVolts();
+        double diodeCurrent = samples.get(diodeAnode).currentAmps();
+
+        assertEquals(0, snapshot.diagnostics().size(), "forward diode diagnostics");
+        assertBetween(0.45, 0.65, diodeVoltage, "forward diode voltage");
+        assertBetween(3.0e-4, 6.0e-4, diodeCurrent, "forward diode current");
+        assertClose((1.0 - diodeVoltage) / 1_000.0, diodeCurrent, "forward diode current balance", 1.0e-6);
+    }
+
+    private static void solvesReverseBiasedDiodeLeakage() {
+        CircuitNetwork network = new CircuitNetwork();
+        CircuitPort sourcePositive = port("diode_reverse/source_positive", new BlockPos(0, 0, 0));
+        CircuitPort sourceNegative = port("diode_reverse/source_negative", new BlockPos(1, 0, 0));
+        CircuitPort resistorPositive = port("diode_reverse/resistor_positive", new BlockPos(0, 0, 1));
+        CircuitPort resistorNegative = port("diode_reverse/resistor_negative", new BlockPos(1, 0, 1));
+        CircuitPort diodeAnode = port("diode_reverse/anode", new BlockPos(0, 0, 2));
+        CircuitPort diodeCathode = port("diode_reverse/cathode", new BlockPos(1, 0, 2));
+
+        network.registerElement(new VoltageSourceElement(id("diode_reverse/source"), sourcePositive, sourceNegative, -1.0));
+        network.registerElement(new ResistorElement(id("diode_reverse/resistor"), resistorPositive, resistorNegative, 1_000.0));
+        network.registerElement(new DiodeElement(id("diode_reverse/diode"), diodeAnode, diodeCathode));
+        network.registerElement(new TestIdealLinkElement(id("diode_reverse/source_link"), sourcePositive, resistorPositive));
+        network.registerElement(new TestIdealLinkElement(id("diode_reverse/anode_link"), resistorNegative, diodeAnode));
+        network.registerElement(new TestIdealLinkElement(id("diode_reverse/cathode_link"), diodeCathode, sourceNegative));
+
+        CircuitSnapshot snapshot = network.snapshot(0.0);
+        Map<CircuitPort, CircuitSample> samples = samplesByPort(snapshot);
+        double diodeVoltage = samples.get(diodeAnode).voltageVolts() - samples.get(diodeCathode).voltageVolts();
+        double diodeCurrent = samples.get(diodeAnode).currentAmps();
+
+        assertEquals(0, snapshot.diagnostics().size(), "reverse diode diagnostics");
+        assertBetween(-1.01, -0.99, diodeVoltage, "reverse diode voltage");
+        assertBetween(-1.1e-12, -0.9e-12, diodeCurrent, "reverse diode current");
+    }
+
+    private static void linearizesForwardBiasedDiodeForAcSmallSignal() {
+        CircuitNetwork network = new CircuitNetwork();
+        CircuitPort sourcePositive = port("diode_small_signal/source_positive", new BlockPos(0, 0, 0));
+        CircuitPort sourceNegative = port("diode_small_signal/source_negative", new BlockPos(1, 0, 0));
+        CircuitPort resistorPositive = port("diode_small_signal/resistor_positive", new BlockPos(0, 0, 1));
+        CircuitPort resistorNegative = port("diode_small_signal/resistor_negative", new BlockPos(1, 0, 1));
+        CircuitPort diodeAnode = port("diode_small_signal/anode", new BlockPos(0, 0, 2));
+        CircuitPort diodeCathode = port("diode_small_signal/cathode", new BlockPos(1, 0, 2));
+        double smallSignalCurrentAmps = 1.0e-6;
+
+        network.registerElement(new VoltageSourceElement(id("diode_small_signal/source"), sourcePositive, sourceNegative, 1.0));
+        network.registerElement(new ResistorElement(id("diode_small_signal/resistor"), resistorPositive, resistorNegative, 1_000.0));
+        network.registerElement(new DiodeElement(id("diode_small_signal/diode"), diodeAnode, diodeCathode));
+        network.registerElement(new TestIdealLinkElement(id("diode_small_signal/source_link"), sourcePositive, resistorPositive));
+        network.registerElement(new TestIdealLinkElement(id("diode_small_signal/anode_link"), resistorNegative, diodeAnode));
+        network.registerElement(new TestIdealLinkElement(id("diode_small_signal/cathode_link"), diodeCathode, sourceNegative));
+        network.registerElement(new TestAcCurrentSourceElement(
+                id("diode_small_signal/ac_current"),
+                diodeCathode,
+                diodeAnode,
+                CircuitPhasor.real(smallSignalCurrentAmps)
+        ));
+
+        CircuitSnapshot dcSnapshot = network.snapshot(0.0);
+        Map<CircuitPort, CircuitSample> dcSamples = samplesByPort(dcSnapshot);
+        double diodeCurrent = dcSamples.get(diodeAnode).currentAmps();
+        double expectedConductance = (diodeCurrent + DiodeElement.DEFAULT_SATURATION_CURRENT_AMPS)
+                / DiodeElement.DEFAULT_THERMAL_VOLTAGE_VOLTS;
+        double expectedVoltage = smallSignalCurrentAmps / expectedConductance;
+
+        AcCircuitSnapshot acSnapshot = network.acSnapshot(1_000.0, 0.0);
+        Map<CircuitPort, AcCircuitSample> acSamples = acSamplesByPort(acSnapshot);
+        CircuitPhasor diodeVoltage = phasorDifference(
+                acSamples.get(diodeAnode).voltageVolts(),
+                acSamples.get(diodeCathode).voltageVolts()
+        );
+
+        assertEquals(0, dcSnapshot.diagnostics().size(), "small-signal diode DC diagnostics");
+        assertEquals(0, acSnapshot.diagnostics().size(), "small-signal diode AC diagnostics");
+        assertPhasorClose(CircuitPhasor.real(expectedVoltage), diodeVoltage, "small-signal diode voltage");
     }
 
     private static void reportsShortedVoltageSource() {
@@ -634,6 +863,18 @@ public final class CircuitNetworkSmokeTest {
         }
     }
 
+    private static void assertClose(double expected, double actual, String label, double epsilon) {
+        if (Math.abs(expected - actual) > epsilon) {
+            throw new AssertionError(label + ": expected " + expected + ", got " + actual);
+        }
+    }
+
+    private static void assertBetween(double minInclusive, double maxInclusive, double actual, String label) {
+        if (actual < minInclusive || actual > maxInclusive) {
+            throw new AssertionError(label + ": expected between " + minInclusive + " and " + maxInclusive + ", got " + actual);
+        }
+    }
+
     private static void assertPhasorClose(CircuitPhasor expected, CircuitPhasor actual, String label) {
         assertClose(expected.real(), actual.real(), label + " real");
         assertClose(expected.imaginary(), actual.imaginary(), label + " imaginary");
@@ -824,6 +1065,23 @@ public final class CircuitNetworkSmokeTest {
         @Override
         public void stamp(AcCircuitEquationBuilder builder) {
             builder.addAdmittance(positivePort, negativePort, admittanceSiemens);
+        }
+    }
+
+    private record TestAcCurrentSourceElement(
+            ResourceLocation id,
+            CircuitPort positivePort,
+            CircuitPort negativePort,
+            CircuitPhasor currentAmps
+    ) implements AcLinearCircuitElement {
+        @Override
+        public List<CircuitPort> ports() {
+            return List.of(positivePort, negativePort);
+        }
+
+        @Override
+        public void stamp(AcCircuitEquationBuilder builder) {
+            builder.addCurrentSource(positivePort, negativePort, currentAmps);
         }
     }
 

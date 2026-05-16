@@ -22,6 +22,8 @@ public interface CircuitAccess {
 
     AcCircuitSnapshot acSnapshot(ServerLevel level, double frequencyHertz);
 
+    CircuitSnapshot stepTransient(ServerLevel level, double timeStepSeconds);
+
     Optional<CircuitSample> samplePort(ServerLevel level, CircuitPort port);
 
     Optional<AcCircuitSample> sampleAcPort(ServerLevel level, CircuitPort port, double frequencyHertz);
