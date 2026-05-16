@@ -8,10 +8,14 @@ import com.firedoge.emcore.api.circuit.AcCircuitEquationBuilder;
 import com.firedoge.emcore.api.circuit.AcCircuitSample;
 import com.firedoge.emcore.api.circuit.AcCircuitSnapshot;
 import com.firedoge.emcore.api.circuit.AcLinearCircuitElement;
+import com.firedoge.emcore.api.circuit.BatchTransientRequest;
+import com.firedoge.emcore.api.circuit.BatchTransientResult;
 import com.firedoge.emcore.api.circuit.CapacitorElement;
 import com.firedoge.emcore.api.circuit.CircuitBranchCurrent;
 import com.firedoge.emcore.api.circuit.CircuitEquationBuilder;
+import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitDiagnosticType;
+import com.firedoge.emcore.api.circuit.CircuitNetlist;
 import com.firedoge.emcore.api.circuit.CircuitPhasor;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
@@ -22,6 +26,7 @@ import com.firedoge.emcore.api.circuit.DiodeElement;
 import com.firedoge.emcore.api.circuit.InductorElement;
 import com.firedoge.emcore.api.circuit.LinearCircuitElement;
 import com.firedoge.emcore.api.circuit.ResistorElement;
+import com.firedoge.emcore.api.circuit.TransientVoltageSourceElement;
 import com.firedoge.emcore.api.circuit.VoltageSourceElement;
 import com.firedoge.emcore.api.circuit.WireElement;
 import net.minecraft.core.BlockPos;
@@ -40,6 +45,8 @@ public final class CircuitNetworkSmokeTest {
         stepsTransientRcChargingCircuit();
         stepsTransientRlEnergizingCircuit();
         stepsTransientDiodeCapacitorChargingCircuit();
+        solvesBatchTransientRcWithTimeVaryingSource();
+        solvesBatchTransientDiodeCapacitorCircuit();
         solvesForwardBiasedDiodeOperatingPoint();
         solvesReverseBiasedDiodeLeakage();
         linearizesForwardBiasedDiodeForAcSmallSignal();
@@ -199,6 +206,91 @@ public final class CircuitNetworkSmokeTest {
                 1.8e-7,
                 secondSamples.get(capacitorPositive).storedEnergyJoules(),
                 "transient diode-capacitor stored energy should increase"
+        );
+    }
+
+    private static void solvesBatchTransientRcWithTimeVaryingSource() {
+        CircuitPort sourcePositive = port("batch_rc/source_positive", new BlockPos(0, 0, 0));
+        CircuitPort sourceNegative = port("batch_rc/source_negative", new BlockPos(1, 0, 0));
+        CircuitPort resistorPositive = port("batch_rc/resistor_positive", new BlockPos(0, 0, 1));
+        CircuitPort resistorNegative = port("batch_rc/resistor_negative", new BlockPos(1, 0, 1));
+        CircuitPort capacitorPositive = port("batch_rc/capacitor_positive", new BlockPos(0, 0, 2));
+        CircuitPort capacitorNegative = port("batch_rc/capacitor_negative", new BlockPos(1, 0, 2));
+
+        List<CircuitElement> elements = List.of(
+                new TransientVoltageSourceElement(
+                        id("batch_rc/source"),
+                        sourcePositive,
+                        sourceNegative,
+                        timeSeconds -> timeSeconds < 0.0015 ? 0.0 : 10.0
+                ),
+                new ResistorElement(id("batch_rc/resistor"), resistorPositive, resistorNegative, 1_000.0),
+                new CapacitorElement(id("batch_rc/capacitor"), capacitorPositive, capacitorNegative, 1.0e-6),
+                new TestIdealLinkElement(id("batch_rc/source_link"), sourcePositive, resistorPositive),
+                new TestIdealLinkElement(id("batch_rc/capacitor_link"), resistorNegative, capacitorPositive),
+                new TestIdealLinkElement(id("batch_rc/ground_link"), capacitorNegative, sourceNegative)
+        );
+        BatchTransientResult result = BatchTransientSolver.solve(new BatchTransientRequest(
+                new CircuitNetlist(elements),
+                0.001,
+                2,
+                List.of(sourcePositive, capacitorPositive)
+        ));
+
+        Map<CircuitPort, CircuitSample> firstSamples = samplesByPort(result.steps().getFirst().probeSamples());
+        Map<CircuitPort, CircuitSample> secondSamples = samplesByPort(result.steps().get(1).probeSamples());
+
+        assertEquals(0, result.diagnostics().size(), "batch transient diagnostics");
+        assertEquals(2, result.steps().size(), "batch transient step count");
+        assertClose(0.001, result.steps().getFirst().timeSeconds(), "batch transient first time");
+        assertClose(0.002, result.steps().get(1).timeSeconds(), "batch transient second time");
+        assertClose(0.0, firstSamples.get(sourcePositive).voltageVolts(), "batch transient first source voltage");
+        assertClose(0.0, firstSamples.get(capacitorPositive).voltageVolts(), "batch transient first capacitor voltage");
+        assertClose(10.0, secondSamples.get(sourcePositive).voltageVolts(), "batch transient second source voltage");
+        assertClose(5.0, secondSamples.get(capacitorPositive).voltageVolts(), "batch transient second capacitor voltage");
+    }
+
+    private static void solvesBatchTransientDiodeCapacitorCircuit() {
+        CircuitPort sourcePositive = port("batch_diode_cap/source_positive", new BlockPos(0, 0, 0));
+        CircuitPort sourceNegative = port("batch_diode_cap/source_negative", new BlockPos(1, 0, 0));
+        CircuitPort diodeAnode = port("batch_diode_cap/anode", new BlockPos(0, 0, 1));
+        CircuitPort diodeCathode = port("batch_diode_cap/cathode", new BlockPos(1, 0, 1));
+        CircuitPort capacitorPositive = port("batch_diode_cap/capacitor_positive", new BlockPos(0, 0, 2));
+        CircuitPort capacitorNegative = port("batch_diode_cap/capacitor_negative", new BlockPos(1, 0, 2));
+
+        List<CircuitElement> elements = List.of(
+                new TransientVoltageSourceElement(
+                        id("batch_diode_cap/source"),
+                        sourcePositive,
+                        sourceNegative,
+                        ignored -> 1.0
+                ),
+                new DiodeElement(id("batch_diode_cap/diode"), diodeAnode, diodeCathode),
+                new CapacitorElement(id("batch_diode_cap/capacitor"), capacitorPositive, capacitorNegative, 1.0e-6),
+                new TestIdealLinkElement(id("batch_diode_cap/anode_link"), sourcePositive, diodeAnode),
+                new TestIdealLinkElement(id("batch_diode_cap/cathode_link"), diodeCathode, capacitorPositive),
+                new TestIdealLinkElement(id("batch_diode_cap/ground_link"), capacitorNegative, sourceNegative)
+        );
+        BatchTransientResult result = BatchTransientSolver.solve(new BatchTransientRequest(
+                new CircuitNetlist(elements),
+                0.001,
+                2,
+                List.of(diodeAnode, diodeCathode, capacitorPositive)
+        ));
+
+        Map<CircuitPort, CircuitSample> firstSamples = samplesByPort(result.steps().getFirst().probeSamples());
+        Map<CircuitPort, CircuitSample> secondSamples = samplesByPort(result.steps().get(1).probeSamples());
+        double firstCapacitorVoltage = firstSamples.get(capacitorPositive).voltageVolts();
+        double secondCapacitorVoltage = secondSamples.get(capacitorPositive).voltageVolts();
+
+        assertEquals(0, result.diagnostics().size(), "batch diode-capacitor diagnostics");
+        assertBetween(0.45, 0.55, firstCapacitorVoltage, "batch diode-capacitor first-step capacitor voltage");
+        assertBetween(0.50, 0.60, secondCapacitorVoltage, "batch diode-capacitor second-step capacitor voltage");
+        assertBetween(
+                firstCapacitorVoltage,
+                0.60,
+                secondCapacitorVoltage,
+                "batch diode-capacitor capacitor voltage should increase"
         );
     }
 
@@ -829,8 +921,12 @@ public final class CircuitNetworkSmokeTest {
     }
 
     private static Map<CircuitPort, CircuitSample> samplesByPort(CircuitSnapshot snapshot) {
+        return samplesByPort(snapshot.samples());
+    }
+
+    private static Map<CircuitPort, CircuitSample> samplesByPort(List<CircuitSample> samplesList) {
         Map<CircuitPort, CircuitSample> samples = new LinkedHashMap<>();
-        for (CircuitSample sample : snapshot.samples()) {
+        for (CircuitSample sample : samplesList) {
             samples.put(sample.port(), sample);
         }
         return samples;

@@ -148,7 +148,7 @@ public final class CircuitNetwork {
             throw new IllegalArgumentException("timeStepSeconds must be finite and greater than zero");
         }
 
-        SolveTopology topology = buildTransientTopology(timeStepSeconds);
+        SolveTopology topology = buildTransientTopology(timeStepSeconds, simulatedTimeSeconds);
         SolveResult result = MnaSolver.solve(topology, buildNodes(topology));
         Map<CircuitPort, CircuitSample> transientSamples = withTransientStoredEnergy(
                 result.samples(),
@@ -171,6 +171,17 @@ public final class CircuitNetwork {
                 List.copyOf(transientSamples.values()),
                 simulatedTimeSeconds
         );
+    }
+
+    PreparedTransientPlan prepareTransient(double timeStepSeconds, double startTimeSeconds) {
+        if (!Double.isFinite(timeStepSeconds) || timeStepSeconds <= 0.0) {
+            throw new IllegalArgumentException("timeStepSeconds must be finite and greater than zero");
+        }
+        if (!Double.isFinite(startTimeSeconds)) {
+            throw new IllegalArgumentException("startTimeSeconds must be finite");
+        }
+
+        return new PreparedTransientPlan(timeStepSeconds, startTimeSeconds, buildPreparedTransientTopology());
     }
 
     private void solveIfDirty() {
@@ -249,7 +260,7 @@ public final class CircuitNetwork {
         );
     }
 
-    private SolveTopology buildTransientTopology(double timeStepSeconds) {
+    private PreparedTransientTopology buildPreparedTransientTopology() {
         List<CircuitPort> portList = new ArrayList<>(ports.keySet());
         Map<CircuitPort, Integer> portIndexes = new HashMap<>();
         for (int index = 0; index < portList.size(); index++) {
@@ -259,12 +270,7 @@ public final class CircuitNetwork {
         DisjointSet unionFind = new DisjointSet(portList.size());
         TopologyRecorder topologyRecorder = new TopologyRecorder(portIndexes, unionFind);
         EquationRecorder equationRecorder = new EquationRecorder(portIndexes);
-        TransientEquationRecorder transientRecorder = new TransientEquationRecorder(
-                portIndexes,
-                timeStepSeconds,
-                transientVoltages,
-                transientCurrents
-        );
+        List<TransientElementStamp> transientElements = new ArrayList<>();
 
         for (CircuitElement element : elements.values()) {
             if (element instanceof CircuitTopologyElement topologyElement) {
@@ -278,7 +284,7 @@ public final class CircuitNetwork {
         }
         for (CircuitElement element : elements.values()) {
             if (element instanceof TransientCircuitElement transientElement) {
-                transientRecorder.record(element, transientElement);
+                transientElements.add(new TransientElementStamp(element, transientElement));
             }
         }
         for (List<CircuitTerminal> terminals : terminalsByNode.values()) {
@@ -302,6 +308,87 @@ public final class CircuitNetwork {
             nodeByPort[index] = nodeIndex;
         }
 
+        int nodeCount = nodeByRoot.size();
+        return new PreparedTransientTopology(
+                portList,
+                portIndexes,
+                nodeByPort,
+                nodeCount,
+                buildNodes(portList, nodeByPort, nodeCount, "circuit_node"),
+                equationRecorder.conductances(),
+                equationRecorder.currentSources(),
+                equationRecorder.voltageSources(),
+                equationRecorder.voltageControlledCurrentSources(),
+                equationRecorder.voltageControlledVoltageSources(),
+                equationRecorder.currentControlledCurrentSources(),
+                equationRecorder.currentControlledVoltageSources(),
+                nonlinearElements(),
+                List.copyOf(transientElements),
+                combineDiagnostics(topologyRecorder.diagnostics(), equationRecorder.diagnostics()),
+                terminals(),
+                List.copyOf(elements.values())
+        );
+    }
+
+    private SolveTopology buildTransientTopology(double timeStepSeconds, double simulatedTimeSeconds) {
+        List<CircuitPort> portList = new ArrayList<>(ports.keySet());
+        Map<CircuitPort, Integer> portIndexes = new HashMap<>();
+        for (int index = 0; index < portList.size(); index++) {
+            portIndexes.put(portList.get(index), index);
+        }
+
+        DisjointSet unionFind = new DisjointSet(portList.size());
+        TopologyRecorder topologyRecorder = new TopologyRecorder(portIndexes, unionFind);
+        EquationRecorder equationRecorder = new EquationRecorder(portIndexes);
+        TransientEquationRecorder transientRecorder = new TransientEquationRecorder(
+                portIndexes,
+                timeStepSeconds,
+                simulatedTimeSeconds,
+                transientVoltages,
+                transientCurrents
+        );
+
+        for (CircuitElement element : elements.values()) {
+            if (element instanceof CircuitTopologyElement topologyElement) {
+                topologyRecorder.record(element, topologyElement);
+            }
+        }
+        for (CircuitElement element : elements.values()) {
+            if (element instanceof LinearCircuitElement linearElement) {
+                equationRecorder.record(element, linearElement);
+            }
+        }
+        for (CircuitElement element : elements.values()) {
+            if (element instanceof TransientCircuitElement transientElement) {
+                transientRecorder.record(element, transientElement);
+            }
+        }
+        for (List<CircuitTerminal> terminals : terminalsByNode.values()) {
+            unionTerminals(unionFind, portIndexes, terminals);
+        }
+
+        List<VoltageSourceStamp> voltageSources = combineVoltageSources(
+                equationRecorder.voltageSources(),
+                transientRecorder.voltageSources()
+        );
+
+        Map<Integer, Integer> nodeByRoot = new LinkedHashMap<>();
+        Integer preferredGroundRoot = preferredGroundRoot(portIndexes, unionFind, voltageSources);
+        if (preferredGroundRoot != null) {
+            nodeByRoot.put(preferredGroundRoot, 0);
+        }
+
+        int[] nodeByPort = new int[portList.size()];
+        for (int index = 0; index < portList.size(); index++) {
+            int root = unionFind.find(index);
+            Integer nodeIndex = nodeByRoot.get(root);
+            if (nodeIndex == null) {
+                nodeIndex = nodeByRoot.size();
+                nodeByRoot.put(root, nodeIndex);
+            }
+            nodeByPort[index] = nodeIndex;
+        }
+
         return new SolveTopology(
                 portList,
                 portIndexes,
@@ -310,7 +397,7 @@ public final class CircuitNetwork {
                 initialNodeVoltages(portList, nodeByPort, nodeByRoot.size(), transientPortVoltages),
                 combineConductances(equationRecorder.conductances(), transientRecorder.conductances()),
                 combineCurrentSources(equationRecorder.currentSources(), transientRecorder.currentSources()),
-                equationRecorder.voltageSources(),
+                voltageSources,
                 equationRecorder.voltageControlledCurrentSources(),
                 equationRecorder.voltageControlledVoltageSources(),
                 equationRecorder.currentControlledCurrentSources(),
@@ -463,6 +550,23 @@ public final class CircuitNetwork {
         }
 
         List<CurrentSourceStamp> combined = new ArrayList<>(first.size() + second.size());
+        combined.addAll(first);
+        combined.addAll(second);
+        return List.copyOf(combined);
+    }
+
+    private static List<VoltageSourceStamp> combineVoltageSources(
+            List<VoltageSourceStamp> first,
+            List<VoltageSourceStamp> second
+    ) {
+        if (first.isEmpty()) {
+            return second;
+        }
+        if (second.isEmpty()) {
+            return first;
+        }
+
+        List<VoltageSourceStamp> combined = new ArrayList<>(first.size() + second.size());
         combined.addAll(first);
         combined.addAll(second);
         return List.copyOf(combined);
@@ -635,23 +739,35 @@ public final class CircuitNetwork {
     }
 
     private List<CircuitNode> buildNodes(SolveTopology topology) {
+        return buildNodes(topology.ports(), topology.nodeByPort(), topology.nodeCount(), "circuit_node");
+    }
+
+    private List<CircuitNode> buildNodes(AcSolveTopology topology) {
+        return buildNodes(topology.ports(), topology.nodeByPort(), topology.nodeCount(), "ac_circuit_node");
+    }
+
+    private static List<CircuitNode> buildNodes(
+            List<CircuitPort> portList,
+            int[] nodeByPort,
+            int nodeCount,
+            String pathPrefix
+    ) {
         List<CircuitNode> solvedNodes = new ArrayList<>();
-        for (int node = 0; node < topology.nodeCount(); node++) {
-            CircuitPort representative = topology.representativePort(node);
-            ResourceLocation id = ResourceLocation.fromNamespaceAndPath(EMcore.MODID, "circuit_node/" + node);
+        for (int node = 0; node < nodeCount; node++) {
+            CircuitPort representative = representativePort(portList, nodeByPort, node);
+            ResourceLocation id = ResourceLocation.fromNamespaceAndPath(EMcore.MODID, pathPrefix + "/" + node);
             solvedNodes.add(new CircuitNode(id, centerOf(representative)));
         }
         return List.copyOf(solvedNodes);
     }
 
-    private List<CircuitNode> buildNodes(AcSolveTopology topology) {
-        List<CircuitNode> solvedNodes = new ArrayList<>();
-        for (int node = 0; node < topology.nodeCount(); node++) {
-            CircuitPort representative = topology.representativePort(node);
-            ResourceLocation id = ResourceLocation.fromNamespaceAndPath(EMcore.MODID, "ac_circuit_node/" + node);
-            solvedNodes.add(new CircuitNode(id, centerOf(representative)));
+    private static CircuitPort representativePort(List<CircuitPort> portList, int[] nodeByPort, int node) {
+        for (int portIndex = 0; portIndex < nodeByPort.length; portIndex++) {
+            if (nodeByPort[portIndex] == node) {
+                return portList.get(portIndex);
+            }
         }
-        return List.copyOf(solvedNodes);
+        throw new IllegalArgumentException("Unknown circuit node: " + node);
     }
 
     private static void union(
@@ -767,6 +883,151 @@ public final class CircuitNetwork {
             }
         }
         return List.copyOf(nonlinearElements);
+    }
+
+    final class PreparedTransientPlan {
+        private final double timeStepSeconds;
+        private final PreparedTransientTopology baseTopology;
+        private final MnaSolver.PreparedMnaPlan preparedMnaPlan;
+
+        private PreparedTransientPlan(
+                double timeStepSeconds,
+                double startTimeSeconds,
+                PreparedTransientTopology baseTopology
+        ) {
+            this.timeStepSeconds = timeStepSeconds;
+            this.baseTopology = baseTopology;
+            TransientEquationRecorder templateRecorder = recordTransientElements(startTimeSeconds + timeStepSeconds);
+            this.preparedMnaPlan = MnaSolver.prepare(
+                    buildStepTopology(templateRecorder),
+                    baseTopology.nodes(),
+                    new MnaSolver.StaticStampCounts(
+                            baseTopology.conductances().size(),
+                            baseTopology.currentSources().size(),
+                            baseTopology.voltageSources().size(),
+                            baseTopology.voltageControlledCurrentSources().size(),
+                            baseTopology.voltageControlledVoltageSources().size(),
+                            baseTopology.currentControlledCurrentSources().size(),
+                            baseTopology.currentControlledVoltageSources().size()
+                    )
+            );
+        }
+
+        CircuitSnapshot step(double simulatedTimeSeconds) {
+            TransientEquationRecorder transientRecorder = recordTransientElements(simulatedTimeSeconds);
+            SolveTopology topology = buildStepTopology(transientRecorder);
+            SolveResult result = MnaSolver.solvePrepared(topology, preparedMnaPlan);
+            Map<CircuitPort, CircuitSample> transientSamples = withTransientStoredEnergy(
+                    result.samples(),
+                    topology.transientCapacitances(),
+                    topology.transientInductances()
+            );
+
+            if (!hasError(result.diagnostics())) {
+                updateTransientVoltages(topology.transientCapacitances(), transientSamples);
+                updateTransientCurrents(topology.transientInductances(), transientSamples);
+                updateTransientPortVoltages(transientSamples);
+            }
+
+            return new CircuitSnapshot(
+                    result.nodes(),
+                    baseTopology.ports(),
+                    baseTopology.terminals(),
+                    baseTopology.elements(),
+                    result.diagnostics(),
+                    List.copyOf(transientSamples.values()),
+                    simulatedTimeSeconds
+            );
+        }
+
+        private TransientEquationRecorder recordTransientElements(double simulatedTimeSeconds) {
+            TransientEquationRecorder transientRecorder = new TransientEquationRecorder(
+                    baseTopology.portIndexes(),
+                    timeStepSeconds,
+                    simulatedTimeSeconds,
+                    transientVoltages,
+                    transientCurrents
+            );
+            for (TransientElementStamp transientElement : baseTopology.transientElements()) {
+                transientRecorder.record(transientElement.element(), transientElement.transientElement());
+            }
+            return transientRecorder;
+        }
+
+        private SolveTopology buildStepTopology(TransientEquationRecorder transientRecorder) {
+            List<VoltageSourceStamp> voltageSources = combineVoltageSources(
+                    baseTopology.voltageSources(),
+                    transientRecorder.voltageSources()
+            );
+            return new SolveTopology(
+                    baseTopology.ports(),
+                    baseTopology.portIndexes(),
+                    baseTopology.nodeByPort(),
+                    baseTopology.nodeCount(),
+                    initialNodeVoltages(
+                            baseTopology.ports(),
+                            baseTopology.nodeByPort(),
+                            baseTopology.nodeCount(),
+                            transientPortVoltages
+                    ),
+                    combineConductances(baseTopology.conductances(), transientRecorder.conductances()),
+                    combineCurrentSources(baseTopology.currentSources(), transientRecorder.currentSources()),
+                    voltageSources,
+                    baseTopology.voltageControlledCurrentSources(),
+                    baseTopology.voltageControlledVoltageSources(),
+                    baseTopology.currentControlledCurrentSources(),
+                    baseTopology.currentControlledVoltageSources(),
+                    baseTopology.nonlinearElements(),
+                    transientRecorder.capacitances(),
+                    transientRecorder.inductances(),
+                    combineDiagnostics(baseTopology.diagnostics(), transientRecorder.diagnostics())
+            );
+        }
+    }
+
+    record PreparedTransientTopology(
+            List<CircuitPort> ports,
+            Map<CircuitPort, Integer> portIndexes,
+            int[] nodeByPort,
+            int nodeCount,
+            List<CircuitNode> nodes,
+            List<ConductanceStamp> conductances,
+            List<CurrentSourceStamp> currentSources,
+            List<VoltageSourceStamp> voltageSources,
+            List<VoltageControlledCurrentSourceStamp> voltageControlledCurrentSources,
+            List<VoltageControlledVoltageSourceStamp> voltageControlledVoltageSources,
+            List<CurrentControlledCurrentSourceStamp> currentControlledCurrentSources,
+            List<CurrentControlledVoltageSourceStamp> currentControlledVoltageSources,
+            List<NonlinearElementStamp> nonlinearElements,
+            List<TransientElementStamp> transientElements,
+            List<CircuitDiagnostic> diagnostics,
+            List<CircuitTerminal> terminals,
+            List<CircuitElement> elements
+    ) {
+        PreparedTransientTopology {
+            ports = List.copyOf(ports);
+            portIndexes = Map.copyOf(portIndexes);
+            nodeByPort = nodeByPort.clone();
+            nodes = List.copyOf(nodes);
+            conductances = List.copyOf(conductances);
+            currentSources = List.copyOf(currentSources);
+            voltageSources = List.copyOf(voltageSources);
+            voltageControlledCurrentSources = List.copyOf(voltageControlledCurrentSources);
+            voltageControlledVoltageSources = List.copyOf(voltageControlledVoltageSources);
+            currentControlledCurrentSources = List.copyOf(currentControlledCurrentSources);
+            currentControlledVoltageSources = List.copyOf(currentControlledVoltageSources);
+            nonlinearElements = List.copyOf(nonlinearElements);
+            transientElements = List.copyOf(transientElements);
+            diagnostics = List.copyOf(diagnostics);
+            terminals = List.copyOf(terminals);
+            elements = List.copyOf(elements);
+        }
+    }
+
+    record TransientElementStamp(
+            CircuitElement element,
+            TransientCircuitElement transientElement
+    ) {
     }
 
     record SolveTopology(
@@ -1100,25 +1361,30 @@ public final class CircuitNetwork {
     private static final class TransientEquationRecorder implements TransientCircuitEquationBuilder {
         private final Map<CircuitPort, Integer> portIndexes;
         private final double timeStepSeconds;
+        private final double timeSeconds;
         private final Map<ResourceLocation, Double> previousVoltages;
         private final Map<ResourceLocation, Double> previousCurrents;
         private final List<ConductanceStamp> conductances = new ArrayList<>();
         private final List<CurrentSourceStamp> currentSources = new ArrayList<>();
+        private final List<VoltageSourceStamp> voltageSources = new ArrayList<>();
         private final List<TransientCapacitanceStamp> capacitances = new ArrayList<>();
         private final List<TransientInductanceStamp> inductances = new ArrayList<>();
         private final List<CircuitDiagnostic> diagnostics = new ArrayList<>();
         private ResourceLocation elementId;
+        private int branchCurrentIndex;
         private int capacitanceIndex;
         private int inductanceIndex;
 
         private TransientEquationRecorder(
                 Map<CircuitPort, Integer> portIndexes,
                 double timeStepSeconds,
+                double timeSeconds,
                 Map<ResourceLocation, Double> previousVoltages,
                 Map<ResourceLocation, Double> previousCurrents
         ) {
             this.portIndexes = portIndexes;
             this.timeStepSeconds = timeStepSeconds;
+            this.timeSeconds = timeSeconds;
             this.previousVoltages = previousVoltages;
             this.previousCurrents = previousCurrents;
         }
@@ -1128,13 +1394,16 @@ public final class CircuitNetwork {
             Objects.requireNonNull(transientElement, "transientElement");
 
             ResourceLocation previousElementId = elementId;
+            int previousBranchCurrentIndex = branchCurrentIndex;
             int previousCapacitanceIndex = capacitanceIndex;
             int previousInductanceIndex = inductanceIndex;
             elementId = element.id();
+            branchCurrentIndex = 0;
             capacitanceIndex = 0;
             inductanceIndex = 0;
             int conductanceSize = conductances.size();
             int currentSourceSize = currentSources.size();
+            int voltageSourceSize = voltageSources.size();
             int capacitanceSize = capacitances.size();
             int inductanceSize = inductances.size();
 
@@ -1143,6 +1412,7 @@ public final class CircuitNetwork {
             } catch (RuntimeException exception) {
                 trim(conductances, conductanceSize);
                 trim(currentSources, currentSourceSize);
+                trim(voltageSources, voltageSourceSize);
                 trim(capacitances, capacitanceSize);
                 trim(inductances, inductanceSize);
                 diagnostics.add(new CircuitDiagnostic(
@@ -1154,6 +1424,7 @@ public final class CircuitNetwork {
                 EMcore.LOGGER.warn("Transient circuit element {} failed while stamping equations", element.id(), exception);
             } finally {
                 elementId = previousElementId;
+                branchCurrentIndex = previousBranchCurrentIndex;
                 capacitanceIndex = previousCapacitanceIndex;
                 inductanceIndex = previousInductanceIndex;
             }
@@ -1162,6 +1433,55 @@ public final class CircuitNetwork {
         @Override
         public double timeStepSeconds() {
             return timeStepSeconds;
+        }
+
+        @Override
+        public double timeSeconds() {
+            return timeSeconds;
+        }
+
+        @Override
+        public void addConductance(CircuitPort positivePort, CircuitPort negativePort, double conductanceSiemens) {
+            requireFinite(conductanceSiemens, "conductanceSiemens");
+            if (conductanceSiemens == 0.0) {
+                return;
+            }
+
+            conductances.add(new ConductanceStamp(
+                    elementId,
+                    requirePort(positivePort, "positivePort"),
+                    requirePort(negativePort, "negativePort"),
+                    conductanceSiemens
+            ));
+        }
+
+        @Override
+        public void addCurrentSource(CircuitPort positivePort, CircuitPort negativePort, double currentAmps) {
+            requireFinite(currentAmps, "currentAmps");
+            currentSources.add(new CurrentSourceStamp(
+                    elementId,
+                    requirePort(positivePort, "positivePort"),
+                    requirePort(negativePort, "negativePort"),
+                    currentAmps
+            ));
+        }
+
+        @Override
+        public CircuitBranchCurrent addVoltageSource(
+                CircuitPort positivePort,
+                CircuitPort negativePort,
+                double voltageVolts
+        ) {
+            requireFinite(voltageVolts, "voltageVolts");
+            CircuitBranchCurrent branchCurrent = nextBranchCurrent();
+            voltageSources.add(new VoltageSourceStamp(
+                    elementId,
+                    branchCurrent,
+                    requirePort(positivePort, "positivePort"),
+                    requirePort(negativePort, "negativePort"),
+                    voltageVolts
+            ));
+            return branchCurrent;
         }
 
         @Override
@@ -1180,14 +1500,12 @@ public final class CircuitNetwork {
                     checkedNegativePort,
                     companionConductance
             ));
-            if (equivalentCurrent != 0.0) {
-                currentSources.add(new CurrentSourceStamp(
-                        stateId,
-                        checkedPositivePort,
-                        checkedNegativePort,
-                        equivalentCurrent
-                ));
-            }
+            currentSources.add(new CurrentSourceStamp(
+                    stateId,
+                    checkedPositivePort,
+                    checkedNegativePort,
+                    equivalentCurrent
+            ));
             capacitances.add(new TransientCapacitanceStamp(
                     stateId,
                     checkedPositivePort,
@@ -1211,14 +1529,12 @@ public final class CircuitNetwork {
                     checkedNegativePort,
                     companionConductance
             ));
-            if (previousCurrent != 0.0) {
-                currentSources.add(new CurrentSourceStamp(
-                        stateId,
-                        checkedPositivePort,
-                        checkedNegativePort,
-                        previousCurrent
-                ));
-            }
+            currentSources.add(new CurrentSourceStamp(
+                    stateId,
+                    checkedPositivePort,
+                    checkedNegativePort,
+                    previousCurrent
+            ));
             inductances.add(new TransientInductanceStamp(
                     stateId,
                     checkedPositivePort,
@@ -1235,6 +1551,10 @@ public final class CircuitNetwork {
 
         private List<CurrentSourceStamp> currentSources() {
             return List.copyOf(currentSources);
+        }
+
+        private List<VoltageSourceStamp> voltageSources() {
+            return List.copyOf(voltageSources);
         }
 
         private List<TransientCapacitanceStamp> capacitances() {
@@ -1264,6 +1584,13 @@ public final class CircuitNetwork {
             );
         }
 
+        private CircuitBranchCurrent nextBranchCurrent() {
+            return new CircuitBranchCurrent(ResourceLocation.fromNamespaceAndPath(
+                    elementId.getNamespace(),
+                    elementId.getPath() + "/transient_branch_current/" + branchCurrentIndex++
+            ));
+        }
+
         private ResourceLocation nextInductanceStateId() {
             return ResourceLocation.fromNamespaceAndPath(
                     elementId.getNamespace(),
@@ -1274,6 +1601,12 @@ public final class CircuitNetwork {
         private static void requireFinitePositive(double value, String name) {
             if (!Double.isFinite(value) || value <= 0.0) {
                 throw new IllegalArgumentException(name + " must be finite and greater than zero");
+            }
+        }
+
+        private static void requireFinite(double value, String name) {
+            if (!Double.isFinite(value)) {
+                throw new IllegalArgumentException(name + " must be finite");
             }
         }
 

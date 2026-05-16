@@ -7,6 +7,8 @@ import java.util.function.ToDoubleFunction;
 
 import com.firedoge.emcore.api.circuit.AcCircuitSample;
 import com.firedoge.emcore.api.circuit.AcCircuitSnapshot;
+import com.firedoge.emcore.api.circuit.BatchTransientRequest;
+import com.firedoge.emcore.api.circuit.BatchTransientResult;
 import com.firedoge.emcore.api.circuit.CircuitAccess;
 import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
@@ -67,6 +69,11 @@ public final class WorldCircuitAccess implements CircuitAccess {
     @Override
     public CircuitSnapshot stepTransient(ServerLevel level, double timeStepSeconds) {
         return worldManager.getOrCreate(level).stepTransientCircuit(timeStepSeconds);
+    }
+
+    @Override
+    public BatchTransientResult solveTransient(BatchTransientRequest request) {
+        return BatchTransientSolver.solve(request);
     }
 
     @Override

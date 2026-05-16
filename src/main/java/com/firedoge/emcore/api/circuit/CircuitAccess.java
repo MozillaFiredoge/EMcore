@@ -24,6 +24,8 @@ public interface CircuitAccess {
 
     CircuitSnapshot stepTransient(ServerLevel level, double timeStepSeconds);
 
+    BatchTransientResult solveTransient(BatchTransientRequest request);
+
     Optional<CircuitSample> samplePort(ServerLevel level, CircuitPort port);
 
     Optional<AcCircuitSample> sampleAcPort(ServerLevel level, CircuitPort port, double frequencyHertz);

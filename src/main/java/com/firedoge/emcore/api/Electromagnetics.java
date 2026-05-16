@@ -9,6 +9,8 @@ import java.util.concurrent.atomic.AtomicReference;
 import com.firedoge.emcore.api.circuit.CircuitAccess;
 import com.firedoge.emcore.api.circuit.AcCircuitSample;
 import com.firedoge.emcore.api.circuit.AcCircuitSnapshot;
+import com.firedoge.emcore.api.circuit.BatchTransientRequest;
+import com.firedoge.emcore.api.circuit.BatchTransientResult;
 import com.firedoge.emcore.api.circuit.CircuitElement;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
@@ -124,6 +126,17 @@ public final class Electromagnetics {
         @Override
         public CircuitSnapshot stepTransient(ServerLevel level, double timeStepSeconds) {
             return new CircuitSnapshot(List.of(), List.of(), List.of(), List.of(), List.of(), List.of(), 0.0);
+        }
+
+        @Override
+        public BatchTransientResult solveTransient(BatchTransientRequest request) {
+            return new BatchTransientResult(
+                    request.timeStepSeconds(),
+                    request.startTimeSeconds(),
+                    request.probes(),
+                    List.of(),
+                    List.of()
+            );
         }
 
         @Override

@@ -219,8 +219,11 @@ Optional<AcCircuitSample> sample = Electromagnetics.api().circuits().sampleAcPor
 models. The first transient API surface covers ideal capacitors and inductors:
 
 ```java
+double t = builder.timeSeconds();
 builder.addCapacitance(positivePort, negativePort, capacitanceFarads);
 builder.addInductance(positivePort, negativePort, inductanceHenries);
+builder.addVoltageSource(positivePort, negativePort, voltageAt(t));
+builder.addCurrentSource(positivePort, negativePort, currentAt(t));
 ```
 
 The capacitor companion model uses backward Euler:
@@ -263,6 +266,39 @@ For in-game debugging, operators can advance transient solves manually:
 
 The transient debug output reports the requested step size, number of steps, accumulated transient time, diagnostics,
 and per-port `V`, `I`, `P`, and nonzero stored energy `E`.
+
+## Batch Transient Solves
+
+For audio-rate or offline workflows, use the batch transient API instead of stepping a `ServerLevel` circuit:
+
+```java
+CircuitNetlist netlist = new CircuitNetlist(List.of(source, resistor, capacitor, wires));
+BatchTransientRequest request = new BatchTransientRequest(
+        netlist,
+        1.0 / 96_000.0,
+        960,
+        List.of(audioProbePort)
+);
+BatchTransientResult result = Electromagnetics.api().circuits().solveTransient(request);
+```
+
+`CircuitNetlist` is a copied list of ports, terminals, and elements, so the batch solver does not need a
+`ServerLevel`. `TransientVoltageSourceElement` and `TransientCurrentSourceElement` are convenience sources for
+`v(t)` and `i(t)` inputs such as sampled AM/audio waveforms.
+
+Each `BatchTransientStep` reports the step index, time, solved nodes, requested probe samples, and diagnostics. If
+the request has no probes, each step returns all port samples.
+
+The first implementation is intentionally a correctness-oriented fixed-step backend. It prepares the stable port
+index, topology, node mapping, static linear stamps, nonlinear element list, component partition, branch-current
+columns, matrix shape, and static matrix template once per request. Each step restamps transient
+sources/companion terms, copies the prepared matrix template, then fills dynamic RHS/dynamic conductance and
+nonlinear Newton terms before running the current dense solve. Future backends can go deeper by reusing
+factorizations for purely linear fixed-layout blocks.
+
+For the prepared path, transient elements must keep the same stamp layout every step: same stamp count, same
+ports, same order. Stamp zero-valued sources/conductances when a time-varying effect is inactive instead of
+omitting that stamp for the frame.
 
 ## Branch Current
 
