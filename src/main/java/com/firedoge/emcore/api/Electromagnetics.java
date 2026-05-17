@@ -17,8 +17,16 @@ import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
 import com.firedoge.emcore.api.circuit.CircuitTerminal;
 import com.firedoge.emcore.api.event.ElectromagneticEventListener;
+import com.firedoge.emcore.api.field.CoilRegion;
 import com.firedoge.emcore.api.field.ElectricFieldSample;
-import com.firedoge.emcore.api.field.FieldSampler;
+import com.firedoge.emcore.api.field.FieldAccess;
+import com.firedoge.emcore.api.field.FieldRegion;
+import com.firedoge.emcore.api.field.FieldSample;
+import com.firedoge.emcore.api.field.FieldSnapshot;
+import com.firedoge.emcore.api.field.FieldSolveResult;
+import com.firedoge.emcore.api.field.FieldSource;
+import com.firedoge.emcore.api.field.FluxProbe;
+import com.firedoge.emcore.api.field.FluxSample;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
 import com.firedoge.emcore.api.signal.SignalAccess;
 import com.firedoge.emcore.api.signal.SignalSample;
@@ -53,12 +61,12 @@ public final class Electromagnetics {
     }
 
     private static final class EmptyElectromagneticsApi implements ElectromagneticsApi {
-        private final FieldSampler fields = new EmptyFieldSampler();
+        private final FieldAccess fields = new EmptyFieldAccess();
         private final CircuitAccess circuits = new EmptyCircuitAccess();
         private final SignalAccess signals = new EmptySignalAccess();
 
         @Override
-        public FieldSampler fields() {
+        public FieldAccess fields() {
             return fields;
         }
 
@@ -81,7 +89,76 @@ public final class Electromagnetics {
         }
     }
 
-    private static final class EmptyFieldSampler implements FieldSampler {
+    private static final class EmptyFieldAccess implements FieldAccess {
+        @Override
+        public void registerRegion(ServerLevel level, FieldRegion region) {
+        }
+
+        @Override
+        public void unregisterRegion(ServerLevel level, ResourceLocation regionId) {
+        }
+
+        @Override
+        public void registerSource(ServerLevel level, FieldSource source) {
+        }
+
+        @Override
+        public void unregisterSource(ServerLevel level, ResourceLocation sourceId) {
+        }
+
+        @Override
+        public void registerCoil(ServerLevel level, CoilRegion coil) {
+        }
+
+        @Override
+        public void unregisterCoil(ServerLevel level, ResourceLocation coilId) {
+        }
+
+        @Override
+        public List<FieldRegion> regions(ServerLevel level) {
+            return List.of();
+        }
+
+        @Override
+        public List<FieldSource> sources(ServerLevel level) {
+            return List.of();
+        }
+
+        @Override
+        public List<CoilRegion> coils(ServerLevel level) {
+            return List.of();
+        }
+
+        @Override
+        public FieldSnapshot snapshot(ServerLevel level) {
+            return new FieldSnapshot(List.of(), List.of(), List.of(), List.of(), 0L, false);
+        }
+
+        @Override
+        public Optional<FieldSample> sample(ServerLevel level, Vec3 position) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<FluxSample> sampleFlux(ServerLevel level, FluxProbe probe) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<FluxSample> sampleCoil(ServerLevel level, ResourceLocation coilId) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<FieldSolveResult> solve(ServerLevel level, ResourceLocation regionId) {
+            return Optional.empty();
+        }
+
+        @Override
+        public boolean requestSolve(ServerLevel level, ResourceLocation regionId) {
+            return false;
+        }
+
         @Override
         public ElectricFieldSample sampleElectricField(ServerLevel level, Vec3 position) {
             return new ElectricFieldSample(Vec3.ZERO, 0.0, 0.0, 0.0);

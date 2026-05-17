@@ -11,11 +11,20 @@ import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
 import com.firedoge.emcore.api.circuit.CircuitTerminal;
+import com.firedoge.emcore.api.field.CoilRegion;
 import com.firedoge.emcore.api.field.ElectricFieldSample;
+import com.firedoge.emcore.api.field.FieldRegion;
+import com.firedoge.emcore.api.field.FieldSample;
+import com.firedoge.emcore.api.field.FieldSnapshot;
+import com.firedoge.emcore.api.field.FieldSolveResult;
+import com.firedoge.emcore.api.field.FieldSource;
+import com.firedoge.emcore.api.field.FluxProbe;
+import com.firedoge.emcore.api.field.FluxSample;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
 import com.firedoge.emcore.api.signal.SignalSample;
 import com.firedoge.emcore.api.signal.SignalSource;
 import com.firedoge.emcore.internal.circuit.CircuitNetwork;
+import com.firedoge.emcore.internal.field.FieldNetwork;
 import com.firedoge.emcore.internal.signal.SignalNetwork;
 import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
@@ -28,6 +37,7 @@ public final class EmWorldState {
     private static final double GAME_TICK_SECONDS = 1.0 / 20.0;
 
     private final ResourceKey<Level> dimension;
+    private final FieldNetwork fieldNetwork = new FieldNetwork();
     private final CircuitNetwork circuitNetwork = new CircuitNetwork();
     private final SignalNetwork signalNetwork = new SignalNetwork();
     private long gameTicks;
@@ -45,6 +55,7 @@ public final class EmWorldState {
     public void tick() {
         gameTicks++;
         simulatedTimeSeconds += GAME_TICK_SECONDS;
+        fieldNetwork.tick();
         circuitNetwork.tick();
     }
 
@@ -57,24 +68,79 @@ public final class EmWorldState {
     }
 
     public ElectricFieldSample sampleElectricField(Vec3 position) {
-        Objects.requireNonNull(position, "position");
-        return new ElectricFieldSample(Vec3.ZERO, 0.0, 0.0, 0.0);
+        return fieldNetwork.sampleElectricField(position);
     }
 
     public MagneticFieldSample sampleMagneticField(Vec3 position) {
-        Objects.requireNonNull(position, "position");
-        return new MagneticFieldSample(Vec3.ZERO, 0.0, Vec3.ZERO, 0.0);
+        return fieldNetwork.sampleMagneticField(position);
     }
 
     public double samplePotential(Vec3 position) {
-        Objects.requireNonNull(position, "position");
-        return 0.0;
+        return fieldNetwork.samplePotential(position);
     }
 
     public double sampleMagneticFlux(BlockPos position, Direction normal) {
-        Objects.requireNonNull(position, "position");
-        Objects.requireNonNull(normal, "normal");
-        return 0.0;
+        return fieldNetwork.sampleMagneticFlux(position, normal);
+    }
+
+    public Optional<FluxSample> sampleFieldFlux(FluxProbe probe) {
+        return fieldNetwork.sampleFlux(probe);
+    }
+
+    public Optional<FluxSample> sampleFieldCoil(ResourceLocation coilId) {
+        return fieldNetwork.sampleCoil(coilId, simulatedTimeSeconds);
+    }
+
+    public void registerFieldRegion(FieldRegion region) {
+        fieldNetwork.registerRegion(region);
+    }
+
+    public void unregisterFieldRegion(ResourceLocation regionId) {
+        fieldNetwork.unregisterRegion(regionId);
+    }
+
+    public void registerFieldSource(FieldSource source) {
+        fieldNetwork.registerSource(source);
+    }
+
+    public void unregisterFieldSource(ResourceLocation sourceId) {
+        fieldNetwork.unregisterSource(sourceId);
+    }
+
+    public void registerFieldCoil(CoilRegion coil) {
+        fieldNetwork.registerCoil(coil);
+    }
+
+    public void unregisterFieldCoil(ResourceLocation coilId) {
+        fieldNetwork.unregisterCoil(coilId);
+    }
+
+    public List<FieldRegion> fieldRegions() {
+        return fieldNetwork.regions();
+    }
+
+    public List<FieldSource> fieldSources() {
+        return fieldNetwork.sources();
+    }
+
+    public List<CoilRegion> fieldCoils() {
+        return fieldNetwork.coils();
+    }
+
+    public FieldSnapshot fieldSnapshot() {
+        return fieldNetwork.snapshot();
+    }
+
+    public Optional<FieldSample> sampleField(Vec3 position) {
+        return fieldNetwork.sample(position);
+    }
+
+    public Optional<FieldSolveResult> solveField(ResourceLocation regionId) {
+        return fieldNetwork.solve(regionId);
+    }
+
+    public boolean requestFieldSolve(ResourceLocation regionId) {
+        return fieldNetwork.requestSolve(regionId);
     }
 
     public CircuitSnapshot circuitSnapshot() {

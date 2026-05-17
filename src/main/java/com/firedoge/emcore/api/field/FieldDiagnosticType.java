@@ -1,0 +1,11 @@
+package com.firedoge.emcore.api.field;
+
+public enum FieldDiagnosticType {
+    STALE_REGION,
+    SOURCE_REGION_NOT_FOUND,
+    POISSON_SOLVE_IN_PROGRESS,
+    POISSON_SOLVE_DEFERRED,
+    POISSON_SOLVE_DID_NOT_CONVERGE,
+    POISSON_SOLVE_FAILED,
+    SOLVE_NOT_IMPLEMENTED
+}

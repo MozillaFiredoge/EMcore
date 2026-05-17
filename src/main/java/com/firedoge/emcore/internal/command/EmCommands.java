@@ -10,10 +10,21 @@ import com.firedoge.emcore.api.circuit.CircuitSnapshot;
 import com.firedoge.emcore.api.circuit.ResistorElement;
 import com.firedoge.emcore.api.circuit.VoltageSourceElement;
 import com.firedoge.emcore.api.circuit.WireElement;
+import com.firedoge.emcore.api.field.CoilRegion;
+import com.firedoge.emcore.api.field.FieldAccess;
+import com.firedoge.emcore.api.field.FieldDiagnostic;
+import com.firedoge.emcore.api.field.FieldRegion;
+import com.firedoge.emcore.api.field.FieldSample;
+import com.firedoge.emcore.api.field.FieldSnapshot;
+import com.firedoge.emcore.api.field.FieldSolveResult;
+import com.firedoge.emcore.api.field.FieldSource;
+import com.firedoge.emcore.api.field.FluxSample;
+import com.firedoge.emcore.api.field.MagneticFieldSample;
 import com.mojang.brigadier.Command;
 import com.mojang.brigadier.CommandDispatcher;
 import com.mojang.brigadier.arguments.DoubleArgumentType;
 import com.mojang.brigadier.arguments.IntegerArgumentType;
+import com.mojang.brigadier.arguments.StringArgumentType;
 import com.mojang.brigadier.context.CommandContext;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -32,6 +43,8 @@ import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.server.level.ServerLevel;
 import net.minecraft.world.level.Level;
+import net.minecraft.world.phys.AABB;
+import net.minecraft.world.phys.Vec3;
 import net.neoforged.bus.api.SubscribeEvent;
 import net.neoforged.neoforge.event.RegisterCommandsEvent;
 
@@ -39,10 +52,13 @@ public final class EmCommands {
     private static final double TEST_VOLTAGE_VOLTS = 12.0;
     private static final double CONFLICT_TEST_VOLTAGE_VOLTS = 5.0;
     private static final double TEST_RESISTANCE_OHMS = 6.0;
+    private static final double TEST_FIELD_CHARGE_COULOMBS = 1.0e-12;
+    private static final double TEST_FIELD_CURRENT_DENSITY_AMPS_PER_SQUARE_METER = 10_000.0;
     private static final int MAX_TRANSIENT_DEBUG_STEPS = 10_000;
     private static final ResourceLocation TEST_OWNER = ResourceLocation.fromNamespaceAndPath(EMcore.MODID, "debug_test");
 
     private final Map<ResourceKey<Level>, TestCircuit> testCircuits = new HashMap<>();
+    private final Map<ResourceKey<Level>, TestField> testFields = new HashMap<>();
 
     @SubscribeEvent
     public void register(RegisterCommandsEvent event) {
@@ -87,7 +103,33 @@ public final class EmCommands {
                                         .then(Commands.argument("pos", BlockPosArgument.blockPos())
                                                 .executes(this::createConflictTestCircuit)))
                                 .then(Commands.literal("clear")
-                                        .executes(this::clearTestCircuit)))));
+                                        .executes(this::clearTestCircuit))))
+                .then(Commands.literal("field")
+                        .then(Commands.literal("regions")
+                                .executes(EmCommands::listFieldRegions))
+                        .then(Commands.literal("coils")
+                                .executes(EmCommands::listFieldCoils))
+                        .then(Commands.literal("sample")
+                                .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                                        .executes(EmCommands::sampleField)))
+                        .then(Commands.literal("flux")
+                                .then(Commands.argument("coil", StringArgumentType.greedyString())
+                                        .executes(EmCommands::sampleFieldFlux)))
+                        .then(Commands.literal("solve")
+                                .then(Commands.argument("region", StringArgumentType.greedyString())
+                                        .executes(EmCommands::solveFieldRegion)))
+                        .then(Commands.literal("request")
+                                .then(Commands.argument("region", StringArgumentType.greedyString())
+                                        .executes(EmCommands::requestFieldSolve)))
+                        .then(Commands.literal("test")
+                                .then(Commands.literal("create")
+                                        .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                                                .executes(this::createTestField)))
+                                .then(Commands.literal("magnetic")
+                                        .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                                                .executes(this::createTestMagneticField)))
+                                .then(Commands.literal("clear")
+                                        .executes(this::clearTestField)))));
     }
 
     private static int listCircuit(CommandContext<CommandSourceStack> context) {
@@ -114,6 +156,289 @@ public final class EmCommands {
                 context.getSource().sendSuccess(() -> describeDiagnostic(diagnostic), false);
             }
         }
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int listFieldRegions(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        FieldSnapshot snapshot = Electromagnetics.api().fields().snapshot(level);
+
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "EMcore fields %s: %d regions, %d sources, %d dirty regions, %d diagnostics, version=%d",
+                level.dimension().location(),
+                snapshot.regions().size(),
+                snapshot.sources().size(),
+                snapshot.dirtyRegionIds().size(),
+                snapshot.diagnostics().size(),
+                snapshot.version()
+        )).withStyle(ChatFormatting.AQUA), false);
+
+        snapshot.regions().forEach(region -> context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "%s bounds=[%s,%s,%s -> %s,%s,%s] cell=%sm estimatedCells=%d%s",
+                region.id(),
+                format(region.bounds().minX),
+                format(region.bounds().minY),
+                format(region.bounds().minZ),
+                format(region.bounds().maxX),
+                format(region.bounds().maxY),
+                format(region.bounds().maxZ),
+                format(region.cellSizeMeters()),
+                region.estimatedCellCount(),
+                snapshot.dirtyRegionIds().contains(region.id()) ? " dirty" : ""
+        )).withStyle(snapshot.dirtyRegionIds().contains(region.id())
+                ? ChatFormatting.YELLOW
+                : ChatFormatting.GRAY), false));
+
+        if (!snapshot.diagnostics().isEmpty()) {
+            context.getSource().sendSuccess(() -> Component.literal(
+                    "Diagnostics: " + snapshot.diagnostics().size()).withStyle(ChatFormatting.RED), false);
+            for (FieldDiagnostic diagnostic : snapshot.diagnostics()) {
+                context.getSource().sendSuccess(() -> describeFieldDiagnostic(diagnostic), false);
+            }
+        }
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int listFieldCoils(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        List<CoilRegion> coils = Electromagnetics.api().fields().coils(level);
+
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "EMcore field coils %s: %d coils",
+                level.dimension().location(),
+                coils.size()
+        )).withStyle(ChatFormatting.AQUA), false);
+
+        coils.forEach(coil -> context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "%s region=%s center=(%s,%s,%s) normal=%s area=%sm^2 turns=%d",
+                coil.id(),
+                coil.regionId(),
+                format(coil.center().x),
+                format(coil.center().y),
+                format(coil.center().z),
+                coil.normal(),
+                format(coil.areaSquareMeters()),
+                coil.turns()
+        )).withStyle(ChatFormatting.GRAY), false));
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int sampleField(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        BlockPos position = BlockPosArgument.getBlockPos(context, "pos");
+        Vec3 samplePosition = Vec3.atCenterOf(position);
+
+        FieldSample sample = Electromagnetics.api().fields().sample(level, samplePosition).orElse(null);
+        if (sample == null) {
+            context.getSource().sendSuccess(() -> Component.literal("No EMcore field region contains "
+                    + format(position)).withStyle(ChatFormatting.YELLOW), false);
+            return 0;
+        }
+        MagneticFieldSample magneticSample = Electromagnetics.api().fields().sampleMagneticField(level, samplePosition);
+
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "%s E=(%s,%s,%s)V/m B=(%s,%s,%s)T phi=%sV rho=%sC/m^3 u=%sJ/m^3 regions=%d%s",
+                format(position),
+                format(sample.electricFieldVoltsPerMeter().x),
+                format(sample.electricFieldVoltsPerMeter().y),
+                format(sample.electricFieldVoltsPerMeter().z),
+                format(magneticSample.fluxDensityTesla().x),
+                format(magneticSample.fluxDensityTesla().y),
+                format(magneticSample.fluxDensityTesla().z),
+                format(sample.potentialVolts()),
+                format(sample.chargeDensityCoulombsPerCubicMeter()),
+                format(sample.energyDensityJoulesPerCubicMeter()),
+                sample.regionIds().size(),
+                sample.stale() ? " stale" : ""
+        )).withStyle(sample.stale() ? ChatFormatting.YELLOW : ChatFormatting.AQUA), false);
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int sampleFieldFlux(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        ResourceLocation coilId = parseId(StringArgumentType.getString(context, "coil"));
+        FluxSample sample = Electromagnetics.api().fields().sampleCoil(level, coilId).orElse(null);
+        if (sample == null) {
+            context.getSource().sendSuccess(() -> Component.literal("No EMcore field coil named " + coilId)
+                    .withStyle(ChatFormatting.YELLOW), false);
+            return 0;
+        }
+
+        String inducedVoltage = sample.inducedVoltageVolts().isPresent()
+                ? format(sample.inducedVoltageVolts().getAsDouble()) + "V"
+                : "n/a";
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "%s region=%s normal=%s Bn=%sT flux=%sWb linkage=%sWb induced=%s%s",
+                sample.probeId(),
+                sample.regionId(),
+                sample.normal(),
+                format(sample.normalFluxDensityTesla()),
+                format(sample.fluxWebers()),
+                format(sample.fluxLinkageWebers()),
+                inducedVoltage,
+                sample.stale() ? " stale" : ""
+        )).withStyle(sample.stale() ? ChatFormatting.YELLOW : ChatFormatting.AQUA), false);
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int solveFieldRegion(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        ResourceLocation regionId = parseId(StringArgumentType.getString(context, "region"));
+        FieldAccess fields = Electromagnetics.api().fields();
+        FieldSolveResult result = fields.solve(level, regionId).orElse(null);
+
+        if (result == null) {
+            context.getSource().sendSuccess(() -> Component.literal("No EMcore field region named " + regionId)
+                    .withStyle(ChatFormatting.YELLOW), false);
+            return 0;
+        }
+
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "Solved EMcore field %s: %dx%dx%d cells=%d sources=%d iterations=%d converged=%s maxDelta=%sV residual=%s elapsed=%sms",
+                result.regionId(),
+                result.xSize(),
+                result.ySize(),
+                result.zSize(),
+                result.cellCount(),
+                result.sourceCount(),
+                result.iterations(),
+                result.converged(),
+                format(result.maxDeltaVolts()),
+                format(result.maxResidual()),
+                format(result.elapsedMillis())
+        )).withStyle(result.converged() ? ChatFormatting.AQUA : ChatFormatting.YELLOW), false);
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private static int requestFieldSolve(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        ResourceLocation regionId = parseId(StringArgumentType.getString(context, "region"));
+        boolean accepted = Electromagnetics.api().fields().requestSolve(level, regionId);
+
+        context.getSource().sendSuccess(() -> Component.literal(accepted
+                ? "Queued EMcore field solve for " + regionId
+                : "No EMcore field region named " + regionId).withStyle(accepted
+                        ? ChatFormatting.AQUA
+                        : ChatFormatting.YELLOW), false);
+
+        return accepted ? Command.SINGLE_SUCCESS : 0;
+    }
+
+    private int createTestField(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        BlockPos base = BlockPosArgument.getBlockPos(context, "pos");
+        FieldAccess fields = Electromagnetics.api().fields();
+
+        unregisterTestField(level);
+
+        ResourceLocation regionId = testId("field/region");
+        ResourceLocation chargeId = testId("field/charge");
+        AABB bounds = new AABB(
+                base.getX() - 8.0,
+                base.getY() - 8.0,
+                base.getZ() - 8.0,
+                base.getX() + 9.0,
+                base.getY() + 9.0,
+                base.getZ() + 9.0
+        );
+        FieldRegion region = new FieldRegion(regionId, bounds, 1.0);
+        FieldSource charge = FieldSource.pointCharge(
+                chargeId,
+                regionId,
+                Vec3.atCenterOf(base),
+                TEST_FIELD_CHARGE_COULOMBS
+        );
+
+        fields.registerRegion(level, region);
+        fields.registerSource(level, charge);
+        testFields.put(level.dimension(), new TestField(regionId, List.of(chargeId), List.of()));
+
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "Created EMcore test field %s at %s with %.6gC point charge; run /emcore field solve %s",
+                regionId,
+                format(base),
+                TEST_FIELD_CHARGE_COULOMBS,
+                regionId
+        )).withStyle(ChatFormatting.AQUA), false);
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private int createTestMagneticField(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        BlockPos base = BlockPosArgument.getBlockPos(context, "pos");
+        FieldAccess fields = Electromagnetics.api().fields();
+
+        unregisterTestField(level);
+
+        ResourceLocation regionId = testId("field/region");
+        ResourceLocation currentId = testId("field/current");
+        ResourceLocation coilId = testId("field/coil");
+        AABB bounds = new AABB(
+                base.getX() - 8.0,
+                base.getY() - 8.0,
+                base.getZ() - 8.0,
+                base.getX() + 9.0,
+                base.getY() + 9.0,
+                base.getZ() + 9.0
+        );
+        FieldRegion region = new FieldRegion(regionId, bounds, 1.0);
+        FieldSource current = FieldSource.currentDensity(
+                currentId,
+                regionId,
+                Vec3.atCenterOf(base),
+                1.0,
+                new Vec3(0.0, TEST_FIELD_CURRENT_DENSITY_AMPS_PER_SQUARE_METER, 0.0)
+        );
+        CoilRegion coil = new CoilRegion(
+                coilId,
+                regionId,
+                Vec3.atCenterOf(base.east()),
+                Direction.NORTH,
+                1.0,
+                10
+        );
+
+        fields.registerRegion(level, region);
+        fields.registerSource(level, current);
+        fields.registerCoil(level, coil);
+        testFields.put(level.dimension(), new TestField(regionId, List.of(currentId), List.of(coilId)));
+
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "Created EMcore magnetic test field %s at %s with J=(0,%s,0)A/m^2 and coil %s; run /emcore field solve %s then /emcore field flux %s",
+                regionId,
+                format(base),
+                format(TEST_FIELD_CURRENT_DENSITY_AMPS_PER_SQUARE_METER),
+                coilId,
+                regionId,
+                coilId
+        )).withStyle(ChatFormatting.AQUA), false);
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private int clearTestField(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        boolean removed = unregisterTestField(level);
+
+        context.getSource().sendSuccess(() -> Component.literal(removed
+                ? "Cleared EMcore test field"
+                : "No EMcore test field is registered in this dimension").withStyle(ChatFormatting.YELLOW), false);
 
         return Command.SINGLE_SUCCESS;
     }
@@ -378,6 +703,23 @@ public final class EmCommands {
         return true;
     }
 
+    private boolean unregisterTestField(ServerLevel level) {
+        TestField previous = testFields.remove(level.dimension());
+        if (previous == null) {
+            return false;
+        }
+
+        FieldAccess fields = Electromagnetics.api().fields();
+        for (ResourceLocation coilId : previous.coilIds()) {
+            fields.unregisterCoil(level, coilId);
+        }
+        for (ResourceLocation sourceId : previous.sourceIds()) {
+            fields.unregisterSource(level, sourceId);
+        }
+        fields.unregisterRegion(level, previous.regionId());
+        return true;
+    }
+
     private static Map<CircuitPort, CircuitSample> samplesByPort(CircuitSnapshot snapshot) {
         Map<CircuitPort, CircuitSample> samples = new LinkedHashMap<>();
         for (CircuitSample sample : snapshot.samples()) {
@@ -422,6 +764,23 @@ public final class EmCommands {
         return component;
     }
 
+    private static MutableComponent describeFieldDiagnostic(FieldDiagnostic diagnostic) {
+        ChatFormatting style = switch (diagnostic.severity()) {
+            case ERROR -> ChatFormatting.RED;
+            case WARNING -> ChatFormatting.YELLOW;
+            case INFO -> ChatFormatting.GRAY;
+        };
+
+        MutableComponent component = Component.literal(diagnostic.severity() + " " + diagnostic.type())
+                .withStyle(style)
+                .append(Component.literal(": " + diagnostic.message()).withStyle(ChatFormatting.WHITE));
+        if (!diagnostic.regionIds().isEmpty()) {
+            component.append(Component.literal(" regions=" + diagnostic.regionIds().size())
+                    .withStyle(ChatFormatting.DARK_GRAY));
+        }
+        return component;
+    }
+
     private static String format(BlockPos position) {
         return position.getX() + " " + position.getY() + " " + position.getZ();
     }
@@ -441,6 +800,13 @@ public final class EmCommands {
         return ResourceLocation.fromNamespaceAndPath(EMcore.MODID, "debug_test/" + path);
     }
 
+    private static ResourceLocation parseId(String rawId) {
+        return ResourceLocation.parse(rawId.trim());
+    }
+
     private record TestCircuit(List<CircuitPort> ports, List<ResourceLocation> elementIds) {
+    }
+
+    private record TestField(ResourceLocation regionId, List<ResourceLocation> sourceIds, List<ResourceLocation> coilIds) {
     }
 }
