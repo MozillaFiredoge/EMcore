@@ -3,11 +3,11 @@
 ElectromagneticsCore is a NeoForge mod library for electromagnetic simulation and integration APIs.
 It is intended to provide stable field, circuit, signal, and event interfaces that other mods can build on.
 
-The first development target is a minimal server-side core:
+The server-side core provides:
 
 - public API records and interfaces for field sampling, circuit readings, signal sampling, and EM events
 - per-world service state for simulation ownership
-- a circuit-network MVP before higher-cost field or Maxwell-grid simulation work
+- circuit, signal, and field registries with snapshot-based solver outputs
 
 Other mods should enter through:
 
@@ -15,18 +15,28 @@ Other mods should enter through:
 Electromagnetics.api()
 ```
 
-The current implementation installs a server-side API with per-world state and a minimal DC circuit network.
-It supports registered ports, resistors, ideal voltage sources, and ideal wires. Field and signal solvers
-still return empty samples.
-Custom elements can implement `CircuitTopologyElement`, `LinearCircuitElement`, or both. Topology elements
+The current implementation installs a server-side API with per-world state. Circuits support DC MNA, AC phasor
+solves, nonlinear DC operating points, fixed-step transient solves, batch transient solves, and circuit-field
+coupling. Signals support source registration, channel sampling, attenuation, propagation delay, phase, and
+interference reporting. Fields support finite electrostatic/magnetostatic regions, Poisson solves, field samples,
+flux/coil samples, circuit-current driven sources, induced-voltage circuit sources, and force/torque/energy probes.
+
+Custom circuit elements can implement `CircuitTopologyElement`, `LinearCircuitElement`, or both. Topology elements
 declare ideal node connections through `CircuitTopologyBuilder`; linear elements stamp conductance,
 current-source, voltage-source, voltage-controlled source, and current-controlled source terms through
 `CircuitEquationBuilder`. Current-controlled sources reference a `CircuitBranchCurrent`, usually returned
 by a voltage-source-like stamp or a 0V current probe. EMcore only solves and reports electrical state;
 gameplay rules such as ratings, overload behavior, damage, or shutdown remain the responsibility of the mod
 that owns the element.
-Detailed sign, current, power, branch-current, and DC/AC boundary conventions are documented in
-[`docs/circuit-api.md`](docs/circuit-api.md).
+
+Detailed API guides:
+
+- [`docs/circuit-api.md`](docs/circuit-api.md): circuit signs, stamps, MNA behavior, DC/AC/transient/batch solves,
+  diagnostics, and field-induced voltage sources.
+- [`docs/field-api.md`](docs/field-api.md): field regions, sources, solves, samples, flux/coil APIs, circuit-field
+  coupling, force/torque/energy probes, stale semantics, and current limits.
+- [`docs/signal-api.md`](docs/signal-api.md): signal sources, sampling, attenuation, phase/delay, interference, and
+  AC circuit coupling.
 
 Debug blocks:
 

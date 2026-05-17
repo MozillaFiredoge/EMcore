@@ -13,17 +13,23 @@ import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 
+import com.firedoge.emcore.api.field.ChargedFieldProbe;
 import com.firedoge.emcore.api.field.CoilRegion;
+import com.firedoge.emcore.api.field.CoilTorqueProbe;
+import com.firedoge.emcore.api.field.CurrentSegmentProbe;
 import com.firedoge.emcore.api.field.ElectricFieldSample;
 import com.firedoge.emcore.api.field.FieldDiagnostic;
 import com.firedoge.emcore.api.field.FieldDiagnosticSeverity;
 import com.firedoge.emcore.api.field.FieldDiagnosticType;
+import com.firedoge.emcore.api.field.FieldEnergySample;
+import com.firedoge.emcore.api.field.FieldForceSample;
 import com.firedoge.emcore.api.field.FieldRegion;
 import com.firedoge.emcore.api.field.FieldSample;
 import com.firedoge.emcore.api.field.FieldSnapshot;
 import com.firedoge.emcore.api.field.FieldSolveResult;
 import com.firedoge.emcore.api.field.FieldSource;
 import com.firedoge.emcore.api.field.FieldSourceType;
+import com.firedoge.emcore.api.field.FieldTorqueSample;
 import com.firedoge.emcore.api.field.FluxProbe;
 import com.firedoge.emcore.api.field.FluxSample;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
@@ -277,9 +283,23 @@ public final class FieldNetwork {
                     inducedVoltage = OptionalDouble.of(
                             -(sample.fluxLinkageWebers() - previous.fluxLinkageWebers()) / timeStepSeconds
                     );
+                    coilFluxHistory.put(coilId, new FluxHistory(
+                            sample.fluxLinkageWebers(),
+                            timeSeconds,
+                            inducedVoltage
+                    ));
+                    return Optional.of(sample.withInducedVoltage(inducedVoltage));
+                } else if (timeStepSeconds == 0.0) {
+                    inducedVoltage = previous.inducedVoltageVolts();
                 }
             }
-            coilFluxHistory.put(coilId, new FluxHistory(sample.fluxLinkageWebers(), timeSeconds));
+            if (previous == null) {
+                coilFluxHistory.put(coilId, new FluxHistory(
+                        sample.fluxLinkageWebers(),
+                        timeSeconds,
+                        inducedVoltage
+                ));
+            }
         }
 
         return Optional.of(sample.withInducedVoltage(inducedVoltage));
@@ -315,6 +335,115 @@ public final class FieldNetwork {
                 inducedVoltage,
                 stale
         ));
+    }
+
+    public Optional<FieldEnergySample> sampleEnergy(Vec3 position) {
+        Objects.requireNonNull(position, "position");
+        Optional<FieldSample> electricSample = sample(position);
+        if (electricSample.isEmpty()) {
+            return Optional.empty();
+        }
+
+        FieldSample fieldSample = electricSample.orElseThrow();
+        Vec3 magneticFluxDensity = sampleMagneticField(position).fluxDensityTesla();
+        double magneticEnergyDensity = magneticEnergyDensity(magneticFluxDensity);
+        double electricEnergyDensity = fieldSample.energyDensityJoulesPerCubicMeter();
+        return Optional.of(new FieldEnergySample(
+                position,
+                fieldSample.electricFieldVoltsPerMeter(),
+                magneticFluxDensity,
+                electricEnergyDensity,
+                magneticEnergyDensity,
+                electricEnergyDensity + magneticEnergyDensity,
+                fieldSample.stale() || magneticStale(position),
+                fieldSample.regionIds()
+        ));
+    }
+
+    public Optional<FieldForceSample> sampleForce(ChargedFieldProbe probe) {
+        Objects.requireNonNull(probe, "probe");
+        Optional<FieldSample> electricSample = sample(probe.position());
+        if (electricSample.isEmpty()) {
+            return Optional.empty();
+        }
+
+        FieldSample fieldSample = electricSample.orElseThrow();
+        Vec3 electricField = fieldSample.electricFieldVoltsPerMeter();
+        Vec3 magneticFluxDensity = sampleMagneticField(probe.position()).fluxDensityTesla();
+        Vec3 electricForce = electricField.scale(probe.chargeCoulombs());
+        Vec3 magneticForce = probe.velocityMetersPerSecond()
+                .cross(magneticFluxDensity)
+                .scale(probe.chargeCoulombs());
+
+        return Optional.of(new FieldForceSample(
+                probe.id(),
+                probe.position(),
+                electricField,
+                magneticFluxDensity,
+                electricForce,
+                magneticForce,
+                electricForce.add(magneticForce),
+                fieldSample.stale() || magneticStale(probe.position()),
+                fieldSample.regionIds()
+        ));
+    }
+
+    public Optional<FieldForceSample> sampleForce(CurrentSegmentProbe probe) {
+        Objects.requireNonNull(probe, "probe");
+        Optional<FieldSample> fieldSample = sample(probe.center());
+        if (fieldSample.isEmpty()) {
+            return Optional.empty();
+        }
+
+        FieldSample sample = fieldSample.orElseThrow();
+        Vec3 magneticFluxDensity = sampleMagneticField(probe.center()).fluxDensityTesla();
+        Vec3 magneticForce = probe.lengthVectorMeters()
+                .cross(magneticFluxDensity)
+                .scale(probe.currentAmps());
+
+        return Optional.of(new FieldForceSample(
+                probe.id(),
+                probe.center(),
+                sample.electricFieldVoltsPerMeter(),
+                magneticFluxDensity,
+                Vec3.ZERO,
+                magneticForce,
+                magneticForce,
+                sample.stale() || magneticStale(probe.center()),
+                sample.regionIds()
+        ));
+    }
+
+    public Optional<FieldTorqueSample> sampleTorque(CoilTorqueProbe probe) {
+        Objects.requireNonNull(probe, "probe");
+        Optional<FieldSample> fieldSample = sample(probe.center());
+        if (fieldSample.isEmpty()) {
+            return Optional.empty();
+        }
+
+        FieldSample sample = fieldSample.orElseThrow();
+        Vec3 magneticFluxDensity = sampleMagneticField(probe.center()).fluxDensityTesla();
+        Vec3 magneticMoment = probe.magneticMomentAmpereSquareMeters();
+        Vec3 torque = magneticMoment.cross(magneticFluxDensity);
+
+        return Optional.of(new FieldTorqueSample(
+                probe.id(),
+                probe.center(),
+                magneticMoment,
+                magneticFluxDensity,
+                torque,
+                sample.stale() || magneticStale(probe.center()),
+                sample.regionIds()
+        ));
+    }
+
+    public Optional<FieldTorqueSample> sampleCoilTorque(ResourceLocation coilId, double currentAmps) {
+        Objects.requireNonNull(coilId, "coilId");
+        CoilRegion coil = coils.get(coilId);
+        if (coil == null) {
+            return Optional.empty();
+        }
+        return sampleTorque(CoilTorqueProbe.fromCoil(coil, currentAmps));
     }
 
     public boolean requestSolve(ResourceLocation regionId) {
@@ -361,6 +490,33 @@ public final class FieldNetwork {
         if (regions.containsKey(regionId)) {
             regionRevisions.merge(regionId, 1L, Long::sum);
         }
+    }
+
+    private boolean magneticStale(Vec3 position) {
+        boolean containingRegion = false;
+        boolean sampledSolvedRegion = false;
+        boolean stale = false;
+        for (FieldRegion region : regions.values()) {
+            if (!region.contains(position)) {
+                continue;
+            }
+
+            containingRegion = true;
+            stale |= dirtyRegionIds.contains(region.id()) || pendingSolves.containsKey(region.id());
+            if (solvedMagneticRegions.containsKey(region.id())) {
+                sampledSolvedRegion = true;
+            } else {
+                stale = true;
+            }
+        }
+        return !containingRegion || stale || !sampledSolvedRegion;
+    }
+
+    private static double magneticEnergyDensity(Vec3 magneticFluxDensityTesla) {
+        double magnitudeSquared = magneticFluxDensityTesla.x * magneticFluxDensityTesla.x
+                + magneticFluxDensityTesla.y * magneticFluxDensityTesla.y
+                + magneticFluxDensityTesla.z * magneticFluxDensityTesla.z;
+        return magnitudeSquared / (2.0 * PreparedPoissonRegion.VACUUM_PERMEABILITY_HENRYS_PER_METER);
     }
 
     private void unregisterCoilsInRegion(ResourceLocation regionId) {
@@ -757,7 +913,10 @@ public final class FieldNetwork {
         return Math.max(min, Math.min(max, value));
     }
 
-    private record FluxHistory(double fluxLinkageWebers, double timeSeconds) {
+    private record FluxHistory(double fluxLinkageWebers, double timeSeconds, OptionalDouble inducedVoltageVolts) {
+        private FluxHistory {
+            inducedVoltageVolts = Objects.requireNonNull(inducedVoltageVolts, "inducedVoltageVolts");
+        }
     }
 
     private record PoissonSolveInput(

@@ -47,6 +47,8 @@ special-case them; it consumes the generic topology and equation builder interfa
 
 `DiodeElement` is a convenience nonlinear DC element using the Shockley diode equation. `CapacitorElement` and
 `InductorElement` are convenience ideal reactive elements for AC phasor and fixed-step transient solves.
+`FieldInducedVoltageSourceElement` is a coupling adapter that stamps the induced voltage of a registered field coil
+as an ideal circuit voltage source.
 
 Compiled example elements live under:
 
@@ -300,6 +302,48 @@ For the prepared path, transient elements must keep the same stamp layout every 
 ports, same order. Stamp zero-valued sources/conductances when a time-varying effect is inactive instead of
 omitting that stamp for the frame.
 
+## Field Coupling
+
+Circuit and field coupling is split into two explicit adapters:
+
+- `CircuitDrivenFieldSource` lives in the field API and converts a solved circuit port current into a
+  `FieldSource.currentDensity(...)`.
+- `FieldInducedVoltageSourceElement` lives in the circuit API and converts a registered field coil's induced
+  voltage into an ideal circuit voltage source.
+
+Use `FieldInducedVoltageSourceElement` when a `CoilRegion` should drive a circuit:
+
+```java
+CircuitElement source = new FieldInducedVoltageSourceElement(
+        elementId,
+        positivePort,
+        negativePort,
+        coilId
+);
+
+Electromagnetics.api().circuits().registerElement(level, source);
+```
+
+The stamped sign is:
+
+```text
+V(positivePort) - V(negativePort) = voltageScale * V_induced
+```
+
+`V_induced` comes from the field layer's coil flux-linkage history:
+
+```text
+V_induced = -d(N * Phi) / dt
+```
+
+If the coil cannot be sampled, EMcore stamps 0V and reports `FIELD_COUPLING_NOT_AVAILABLE`. If the coil sample is
+based on a dirty or pending field solve, EMcore still stamps the last available value and reports
+`FIELD_COUPLING_STALE`.
+
+The coupling is snapshot-based and quasi-static. EMcore does not solve a fully implicit circuit-field system in one
+matrix. Addons that need closed-loop machines should design around committed snapshots and one or more ticks of
+latency.
+
 ## Branch Current
 
 `CircuitBranchCurrent` identifies a current unknown introduced by a voltage-like branch:
@@ -340,6 +384,7 @@ Circuit snapshots may include diagnostics for invalid or unsupported linear syst
 - element topology/stamp failures
 - duplicate or missing branch current references
 - dense solver scale warnings for large components
+- unavailable or stale field-coupled coil samples
 - ideal voltage source shorted by ideal conductors
 - conflicting ideal voltage source constraints
 - linear solve failure

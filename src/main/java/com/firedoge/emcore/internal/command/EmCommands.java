@@ -7,6 +7,7 @@ import com.firedoge.emcore.api.circuit.CircuitDiagnostic;
 import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
+import com.firedoge.emcore.api.circuit.FieldInducedVoltageSourceElement;
 import com.firedoge.emcore.api.circuit.ResistorElement;
 import com.firedoge.emcore.api.circuit.VoltageSourceElement;
 import com.firedoge.emcore.api.circuit.WireElement;
@@ -102,6 +103,9 @@ public final class EmCommands {
                                 .then(Commands.literal("conflict")
                                         .then(Commands.argument("pos", BlockPosArgument.blockPos())
                                                 .executes(this::createConflictTestCircuit)))
+                                .then(Commands.literal("coil")
+                                        .then(Commands.argument("pos", BlockPosArgument.blockPos())
+                                                .executes(this::createFieldCoupledCoilCircuit)))
                                 .then(Commands.literal("clear")
                                         .executes(this::clearTestCircuit))))
                 .then(Commands.literal("field")
@@ -128,6 +132,12 @@ public final class EmCommands {
                                 .then(Commands.literal("magnetic")
                                         .then(Commands.argument("pos", BlockPosArgument.blockPos())
                                                 .executes(this::createTestMagneticField)))
+                                .then(Commands.literal("current")
+                                        .then(Commands.argument(
+                                                        "ampsPerSquareMeter",
+                                                        DoubleArgumentType.doubleArg()
+                                                )
+                                                .executes(this::setTestMagneticCurrent)))
                                 .then(Commands.literal("clear")
                                         .executes(this::clearTestField)))));
     }
@@ -443,6 +453,55 @@ public final class EmCommands {
         return Command.SINGLE_SUCCESS;
     }
 
+    private int setTestMagneticCurrent(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        double currentDensity = DoubleArgumentType.getDouble(context, "ampsPerSquareMeter");
+        if (!Double.isFinite(currentDensity)) {
+            throw new IllegalArgumentException("ampsPerSquareMeter must be finite");
+        }
+
+        TestField previous = testFields.get(level.dimension());
+        ResourceLocation currentId = testId("field/current");
+        if (previous == null || !previous.sourceIds().contains(currentId)) {
+            context.getSource().sendSuccess(() -> Component.literal(
+                    "No EMcore magnetic test field is registered; run /emcore field test magnetic <pos> first"
+            ).withStyle(ChatFormatting.YELLOW), false);
+            return 0;
+        }
+
+        FieldRegion region = Electromagnetics.api().fields().regions(level).stream()
+                .filter(candidate -> candidate.id().equals(previous.regionId()))
+                .findFirst()
+                .orElse(null);
+        if (region == null) {
+            context.getSource().sendSuccess(() -> Component.literal("Missing EMcore test field region "
+                    + previous.regionId()).withStyle(ChatFormatting.YELLOW), false);
+            return 0;
+        }
+
+        Vec3 center = new Vec3(
+                (region.bounds().minX + region.bounds().maxX) * 0.5,
+                (region.bounds().minY + region.bounds().maxY) * 0.5,
+                (region.bounds().minZ + region.bounds().maxZ) * 0.5
+        );
+        Electromagnetics.api().fields().registerSource(level, FieldSource.currentDensity(
+                currentId,
+                region.id(),
+                center,
+                1.0,
+                new Vec3(0.0, currentDensity, 0.0)
+        ));
+
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "Updated EMcore magnetic test current to J=(0,%s,0)A/m^2; run /emcore field solve %s",
+                format(currentDensity),
+                region.id()
+        )).withStyle(ChatFormatting.AQUA), false);
+
+        return Command.SINGLE_SUCCESS;
+    }
+
     private int createShortTestCircuit(CommandContext<CommandSourceStack> context) {
         ServerLevel level = context.getSource().getLevel();
         BlockPos base = BlockPosArgument.getBlockPos(context, "pos");
@@ -508,6 +567,59 @@ public final class EmCommands {
         context.getSource().sendSuccess(() -> Component.literal(
                 "Created EMcore conflict test circuit; /emcore circuit list should report VOLTAGE_SOURCE_CONFLICT"
         ).withStyle(ChatFormatting.YELLOW), false);
+
+        return Command.SINGLE_SUCCESS;
+    }
+
+    private int createFieldCoupledCoilCircuit(CommandContext<CommandSourceStack> context) {
+        ServerLevel level = context.getSource().getLevel();
+        BlockPos base = BlockPosArgument.getBlockPos(context, "pos");
+        CircuitAccess circuits = Electromagnetics.api().circuits();
+
+        unregisterTestCircuit(level);
+
+        CircuitPort sourcePositive = testPort("coil_source_positive", base, Direction.UP);
+        CircuitPort sourceNegative = testPort("coil_source_negative", base.south(), Direction.UP);
+        CircuitPort resistorPositive = testPort("coil_resistor_positive", base.east(), Direction.UP);
+        CircuitPort resistorNegative = testPort("coil_resistor_negative", base.east().south(), Direction.UP);
+
+        ResourceLocation coilId = testId("field/coil");
+        ResourceLocation sourceId = testId("coil_induced_source");
+        ResourceLocation resistorId = testId("coil_resistor");
+        ResourceLocation positiveWireId = testId("coil_positive_wire");
+        ResourceLocation negativeWireId = testId("coil_negative_wire");
+
+        circuits.registerElement(level, new FieldInducedVoltageSourceElement(
+                sourceId,
+                sourcePositive,
+                sourceNegative,
+                coilId
+        ));
+        circuits.registerElement(level, new ResistorElement(
+                resistorId,
+                resistorPositive,
+                resistorNegative,
+                TEST_RESISTANCE_OHMS
+        ));
+        circuits.registerElement(level, new WireElement(positiveWireId, sourcePositive, resistorPositive));
+        circuits.registerElement(level, new WireElement(negativeWireId, sourceNegative, resistorNegative));
+
+        testCircuits.put(level.dimension(), new TestCircuit(
+                List.of(sourcePositive, sourceNegative, resistorPositive, resistorNegative),
+                List.of(sourceId, resistorId, positiveWireId, negativeWireId)
+        ));
+
+        context.getSource().sendSuccess(() -> Component.literal(String.format(
+                Locale.ROOT,
+                "Created EMcore coil-coupled test circuit at %s using coil %s and %.6g ohm load",
+                format(base),
+                coilId,
+                TEST_RESISTANCE_OHMS
+        )).withStyle(ChatFormatting.AQUA), false);
+        context.getSource().sendSuccess(() -> Component.literal(
+                "Prime/update the coil with /emcore field flux " + coilId
+                        + ", /emcore field test current <J>, /emcore field solve emcore:debug_test/field/region"
+        ).withStyle(ChatFormatting.GRAY), false);
 
         return Command.SINGLE_SUCCESS;
     }

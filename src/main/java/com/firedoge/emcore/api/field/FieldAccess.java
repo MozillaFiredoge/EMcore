@@ -20,15 +20,31 @@ public interface FieldAccess extends FieldSampler {
 
     void unregisterCoil(ServerLevel level, ResourceLocation coilId);
 
+    void registerCircuitDrivenSource(ServerLevel level, CircuitDrivenFieldSource source);
+
+    void unregisterCircuitDrivenSource(ServerLevel level, ResourceLocation sourceId);
+
     List<FieldRegion> regions(ServerLevel level);
 
     List<FieldSource> sources(ServerLevel level);
 
     List<CoilRegion> coils(ServerLevel level);
 
+    List<CircuitDrivenFieldSource> circuitDrivenSources(ServerLevel level);
+
     FieldSnapshot snapshot(ServerLevel level);
 
     Optional<FieldSample> sample(ServerLevel level, Vec3 position);
+
+    Optional<FieldEnergySample> sampleEnergy(ServerLevel level, Vec3 position);
+
+    Optional<FieldForceSample> sampleForce(ServerLevel level, ChargedFieldProbe probe);
+
+    Optional<FieldForceSample> sampleForce(ServerLevel level, CurrentSegmentProbe probe);
+
+    Optional<FieldTorqueSample> sampleTorque(ServerLevel level, CoilTorqueProbe probe);
+
+    Optional<FieldTorqueSample> sampleCoilTorque(ServerLevel level, ResourceLocation coilId, double currentAmps);
 
     Optional<FluxSample> sampleFlux(ServerLevel level, FluxProbe probe);
 

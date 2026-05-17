@@ -2,17 +2,32 @@ package com.firedoge.emcore.internal.field;
 
 import java.util.Optional;
 
+import com.firedoge.emcore.api.field.ChargedFieldProbe;
+import com.firedoge.emcore.api.circuit.CircuitPort;
+import com.firedoge.emcore.api.circuit.ResistorElement;
+import com.firedoge.emcore.api.circuit.VoltageSourceElement;
+import com.firedoge.emcore.api.circuit.WireElement;
+import com.firedoge.emcore.api.field.CircuitDrivenFieldSource;
 import com.firedoge.emcore.api.field.CoilRegion;
+import com.firedoge.emcore.api.field.CoilTorqueProbe;
+import com.firedoge.emcore.api.field.CurrentSegmentProbe;
 import com.firedoge.emcore.api.field.FieldDiagnosticSeverity;
 import com.firedoge.emcore.api.field.FieldDiagnosticType;
+import com.firedoge.emcore.api.field.FieldEnergySample;
+import com.firedoge.emcore.api.field.FieldForceSample;
 import com.firedoge.emcore.api.field.FieldRegion;
 import com.firedoge.emcore.api.field.FieldSample;
 import com.firedoge.emcore.api.field.FieldSolveResult;
 import com.firedoge.emcore.api.field.FieldSnapshot;
 import com.firedoge.emcore.api.field.FieldSource;
+import com.firedoge.emcore.api.field.FieldTorqueSample;
 import com.firedoge.emcore.api.field.FluxSample;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
+import com.firedoge.emcore.internal.world.EmWorldState;
+import net.minecraft.core.BlockPos;
 import net.minecraft.core.Direction;
+import net.minecraft.core.registries.Registries;
+import net.minecraft.resources.ResourceKey;
 import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.phys.AABB;
 import net.minecraft.world.phys.Vec3;
@@ -31,6 +46,8 @@ public final class FieldNetworkSmokeTest {
         solveProducesFieldSample();
         solveProducesMagneticFieldSample();
         registersCoilAndSamplesFlux();
+        samplesEnergyForceAndTorque();
+        syncsCircuitCurrentIntoFieldSource();
         requestSolveCommitsOnTick();
         tickAutoSchedulesDirtyRegion();
         largeRegionAutoSolveIsDeferred();
@@ -179,6 +196,141 @@ public final class FieldNetworkSmokeTest {
 
         assertTrue(secondSample.inducedVoltageVolts().isPresent(), "second coil sample has induced voltage");
         assertTrue(Math.abs(secondSample.inducedVoltageVolts().getAsDouble()) > 0.0, "induced voltage is nonzero");
+
+        FluxSample repeatedSample = network.sampleCoil(coil.id(), 2.0)
+                .orElseThrow(() -> new AssertionError("expected repeated coil flux sample"));
+        assertTrue(repeatedSample.inducedVoltageVolts().isPresent(), "same-time coil sample keeps induced voltage");
+        assertClose(
+                secondSample.inducedVoltageVolts().getAsDouble(),
+                repeatedSample.inducedVoltageVolts().getAsDouble(),
+                "same-time induced voltage"
+        );
+    }
+
+    private static void samplesEnergyForceAndTorque() {
+        FieldNetwork electricNetwork = new FieldNetwork();
+        FieldRegion electricRegion = region("region/interaction_electric");
+        electricNetwork.registerRegion(electricRegion);
+        electricNetwork.registerSource(FieldSource.pointCharge(
+                id("source/interaction_charge"),
+                electricRegion.id(),
+                new Vec3(2.0, 2.0, 2.0),
+                1.0e-12
+        ));
+        electricNetwork.solve(electricRegion.id()).orElseThrow(() -> new AssertionError("expected electric solve"));
+
+        FieldForceSample chargedForce = electricNetwork.sampleForce(ChargedFieldProbe.stationary(
+                id("probe/charge"),
+                new Vec3(3.0, 2.0, 2.0),
+                1.0
+        )).orElseThrow(() -> new AssertionError("expected charged force sample"));
+        assertTrue(chargedForce.totalForceNewtons().length() > 0.0, "charged probe receives electric force");
+        assertFalse(chargedForce.stale(), "charged force sample fresh");
+
+        FieldNetwork magneticNetwork = new FieldNetwork();
+        FieldRegion magneticRegion = new FieldRegion(
+                id("region/interaction_magnetic"),
+                new AABB(0.0, 0.0, 0.0, 8.0, 8.0, 8.0),
+                1.0
+        );
+        magneticNetwork.registerRegion(magneticRegion);
+        magneticNetwork.registerSource(FieldSource.currentDensity(
+                id("source/interaction_current"),
+                magneticRegion.id(),
+                new Vec3(4.0, 4.0, 4.0),
+                1.0,
+                new Vec3(0.0, 10_000.0, 0.0)
+        ));
+        magneticNetwork.solve(magneticRegion.id()).orElseThrow(() -> new AssertionError("expected magnetic solve"));
+
+        Vec3 probePosition = new Vec3(5.0, 4.0, 4.0);
+        FieldEnergySample energy = magneticNetwork.sampleEnergy(probePosition)
+                .orElseThrow(() -> new AssertionError("expected energy sample"));
+        assertTrue(energy.magneticEnergyDensityJoulesPerCubicMeter() > 0.0, "magnetic energy density");
+        assertClose(
+                energy.electricEnergyDensityJoulesPerCubicMeter()
+                        + energy.magneticEnergyDensityJoulesPerCubicMeter(),
+                energy.totalEnergyDensityJoulesPerCubicMeter(),
+                "total energy density"
+        );
+
+        FieldForceSample segmentForce = magneticNetwork.sampleForce(new CurrentSegmentProbe(
+                id("probe/current_segment"),
+                probePosition,
+                new Vec3(0.0, 1.0, 0.0),
+                1.0,
+                2.0
+        )).orElseThrow(() -> new AssertionError("expected current segment force"));
+        assertTrue(segmentForce.magneticForceNewtons().length() > 0.0, "current segment receives magnetic force");
+
+        FieldTorqueSample torque = magneticNetwork.sampleTorque(new CoilTorqueProbe(
+                id("probe/torque"),
+                probePosition,
+                new Vec3(1.0, 0.0, 0.0),
+                1.0,
+                10,
+                2.0
+        )).orElseThrow(() -> new AssertionError("expected coil torque sample"));
+        assertTrue(torque.torqueNewtonMeters().length() > 0.0, "coil receives magnetic torque");
+        assertFalse(torque.stale(), "torque sample fresh");
+    }
+
+    private static void syncsCircuitCurrentIntoFieldSource() {
+        EmWorldState state = new EmWorldState(ResourceKey.create(Registries.DIMENSION, id("dimension/coupled")));
+        FieldRegion region = region("region/circuit_driven");
+        CircuitPort sourcePositive = circuitPort("coupled/source_positive", new BlockPos(0, 0, 0));
+        CircuitPort sourceNegative = circuitPort("coupled/source_negative", new BlockPos(1, 0, 0));
+        CircuitPort resistorPositive = circuitPort("coupled/resistor_positive", new BlockPos(0, 0, 1));
+        CircuitPort resistorNegative = circuitPort("coupled/resistor_negative", new BlockPos(1, 0, 1));
+        CircuitDrivenFieldSource drivenSource = new CircuitDrivenFieldSource(
+                id("source/circuit_driven"),
+                region.id(),
+                resistorPositive,
+                new Vec3(2.0, 2.0, 2.0),
+                1.0,
+                new Vec3(0.0, 100.0, 0.0)
+        );
+
+        state.registerFieldRegion(region);
+        state.registerCircuitElement(new VoltageSourceElement(
+                id("circuit_driven/source"),
+                sourcePositive,
+                sourceNegative,
+                12.0
+        ));
+        state.registerCircuitElement(new ResistorElement(
+                id("circuit_driven/resistor"),
+                resistorPositive,
+                resistorNegative,
+                6.0
+        ));
+        state.registerCircuitElement(new WireElement(
+                id("circuit_driven/positive_wire"),
+                sourcePositive,
+                resistorPositive
+        ));
+        state.registerCircuitElement(new WireElement(
+                id("circuit_driven/negative_wire"),
+                sourceNegative,
+                resistorNegative
+        ));
+        state.registerCircuitDrivenFieldSource(drivenSource);
+        state.tick();
+
+        FieldSource generatedSource = state.fieldSources().stream()
+                .filter(source -> source.id().equals(drivenSource.id()))
+                .findFirst()
+                .orElseThrow(() -> new AssertionError("expected circuit-driven field source"));
+
+        assertEquals(region.id(), generatedSource.regionId(), "circuit-driven source region");
+        assertClose(0.0, generatedSource.vectorValue().x, "circuit-driven source x current density");
+        assertClose(200.0, generatedSource.vectorValue().y, "circuit-driven source y current density");
+        assertClose(0.0, generatedSource.vectorValue().z, "circuit-driven source z current density");
+        assertTrue(state.fieldSnapshot().dirtyRegionIds().contains(region.id()), "circuit-driven source dirties region");
+
+        state.unregisterCircuitDrivenFieldSource(drivenSource.id());
+        assertFalse(state.fieldSources().stream().anyMatch(source -> source.id().equals(drivenSource.id())),
+                "unregister circuit-driven source removes generated source");
     }
 
     private static void requestSolveCommitsOnTick() {
@@ -280,6 +432,10 @@ public final class FieldNetworkSmokeTest {
 
     private static ResourceLocation id(String path) {
         return ResourceLocation.fromNamespaceAndPath(TEST_NAMESPACE, path);
+    }
+
+    private static CircuitPort circuitPort(String path, BlockPos position) {
+        return new CircuitPort(id("owner/" + path), id("port/" + path), position, Direction.UP);
     }
 
     private static void assertEquals(Object expected, Object actual, String label) {

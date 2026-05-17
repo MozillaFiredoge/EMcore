@@ -7,6 +7,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 
 import com.firedoge.emcore.EMcore;
 import com.firedoge.emcore.api.circuit.AcCircuitEquationBuilder;
@@ -27,6 +28,7 @@ import com.firedoge.emcore.api.circuit.CircuitSnapshot;
 import com.firedoge.emcore.api.circuit.CircuitTerminal;
 import com.firedoge.emcore.api.circuit.CircuitTopologyBuilder;
 import com.firedoge.emcore.api.circuit.CircuitTopologyElement;
+import com.firedoge.emcore.api.circuit.FieldInducedVoltageSourceElement;
 import com.firedoge.emcore.api.circuit.LinearCircuitElement;
 import com.firedoge.emcore.api.circuit.NonlinearCircuitElement;
 import com.firedoge.emcore.api.circuit.NonlinearCircuitEquationBuilder;
@@ -37,6 +39,7 @@ import net.minecraft.resources.ResourceLocation;
 import net.minecraft.world.phys.Vec3;
 
 public final class CircuitNetwork {
+    private final FieldInducedVoltageResolver fieldInducedVoltageResolver;
     private final Map<CircuitPort, CircuitPort> ports = new LinkedHashMap<>();
     private final Map<CircuitPort, Integer> portReferences = new HashMap<>();
     private final Map<CircuitTerminal, Integer> terminalReferences = new HashMap<>();
@@ -49,6 +52,17 @@ public final class CircuitNetwork {
     private List<CircuitNode> nodes = List.of();
     private List<CircuitDiagnostic> diagnostics = List.of();
     private boolean dirty = true;
+
+    public CircuitNetwork() {
+        this(ignored -> FieldInducedVoltage.unavailable());
+    }
+
+    public CircuitNetwork(FieldInducedVoltageResolver fieldInducedVoltageResolver) {
+        this.fieldInducedVoltageResolver = Objects.requireNonNull(
+                fieldInducedVoltageResolver,
+                "fieldInducedVoltageResolver"
+        );
+    }
 
     public void registerPort(CircuitPort port) {
         Objects.requireNonNull(port, "port");
@@ -185,7 +199,7 @@ public final class CircuitNetwork {
     }
 
     private void solveIfDirty() {
-        if (!dirty) {
+        if (!dirty && !hasFieldCoupledElements()) {
             return;
         }
 
@@ -198,6 +212,15 @@ public final class CircuitNetwork {
         dirty = false;
     }
 
+    private boolean hasFieldCoupledElements() {
+        for (CircuitElement element : elements.values()) {
+            if (element instanceof FieldInducedVoltageSourceElement) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     private SolveTopology buildTopology() {
         List<CircuitPort> portList = new ArrayList<>(ports.keySet());
         Map<CircuitPort, Integer> portIndexes = new HashMap<>();
@@ -208,6 +231,10 @@ public final class CircuitNetwork {
         DisjointSet unionFind = new DisjointSet(portList.size());
         TopologyRecorder topologyRecorder = new TopologyRecorder(portIndexes, unionFind);
         EquationRecorder equationRecorder = new EquationRecorder(portIndexes);
+        FieldCoupledVoltageRecorder fieldRecorder = new FieldCoupledVoltageRecorder(
+                portIndexes,
+                fieldInducedVoltageResolver
+        );
 
         for (CircuitElement element : elements.values()) {
             if (element instanceof CircuitTopologyElement topologyElement) {
@@ -219,12 +246,21 @@ public final class CircuitNetwork {
                 equationRecorder.record(element, linearElement);
             }
         }
+        for (CircuitElement element : elements.values()) {
+            if (element instanceof FieldInducedVoltageSourceElement fieldElement) {
+                fieldRecorder.record(fieldElement);
+            }
+        }
         for (List<CircuitTerminal> terminals : terminalsByNode.values()) {
             unionTerminals(unionFind, portIndexes, terminals);
         }
 
+        List<VoltageSourceStamp> voltageSources = combineVoltageSources(
+                equationRecorder.voltageSources(),
+                fieldRecorder.voltageSources()
+        );
         Map<Integer, Integer> nodeByRoot = new LinkedHashMap<>();
-        Integer preferredGroundRoot = preferredGroundRoot(portIndexes, unionFind, equationRecorder.voltageSources());
+        Integer preferredGroundRoot = preferredGroundRoot(portIndexes, unionFind, voltageSources);
         if (preferredGroundRoot != null) {
             nodeByRoot.put(preferredGroundRoot, 0);
         }
@@ -248,7 +284,7 @@ public final class CircuitNetwork {
                 new double[nodeByRoot.size()],
                 equationRecorder.conductances(),
                 equationRecorder.currentSources(),
-                equationRecorder.voltageSources(),
+                voltageSources,
                 equationRecorder.voltageControlledCurrentSources(),
                 equationRecorder.voltageControlledVoltageSources(),
                 equationRecorder.currentControlledCurrentSources(),
@@ -256,7 +292,11 @@ public final class CircuitNetwork {
                 nonlinearElements(),
                 List.of(),
                 List.of(),
-                combineDiagnostics(topologyRecorder.diagnostics(), equationRecorder.diagnostics())
+                combineDiagnostics(
+                        topologyRecorder.diagnostics(),
+                        equationRecorder.diagnostics(),
+                        fieldRecorder.diagnostics()
+                )
         );
     }
 
@@ -270,6 +310,10 @@ public final class CircuitNetwork {
         DisjointSet unionFind = new DisjointSet(portList.size());
         TopologyRecorder topologyRecorder = new TopologyRecorder(portIndexes, unionFind);
         EquationRecorder equationRecorder = new EquationRecorder(portIndexes);
+        FieldCoupledVoltageRecorder fieldRecorder = new FieldCoupledVoltageRecorder(
+                portIndexes,
+                fieldInducedVoltageResolver
+        );
         List<TransientElementStamp> transientElements = new ArrayList<>();
 
         for (CircuitElement element : elements.values()) {
@@ -283,6 +327,11 @@ public final class CircuitNetwork {
             }
         }
         for (CircuitElement element : elements.values()) {
+            if (element instanceof FieldInducedVoltageSourceElement fieldElement) {
+                fieldRecorder.record(fieldElement);
+            }
+        }
+        for (CircuitElement element : elements.values()) {
             if (element instanceof TransientCircuitElement transientElement) {
                 transientElements.add(new TransientElementStamp(element, transientElement));
             }
@@ -291,8 +340,12 @@ public final class CircuitNetwork {
             unionTerminals(unionFind, portIndexes, terminals);
         }
 
+        List<VoltageSourceStamp> voltageSources = combineVoltageSources(
+                equationRecorder.voltageSources(),
+                fieldRecorder.voltageSources()
+        );
         Map<Integer, Integer> nodeByRoot = new LinkedHashMap<>();
-        Integer preferredGroundRoot = preferredGroundRoot(portIndexes, unionFind, equationRecorder.voltageSources());
+        Integer preferredGroundRoot = preferredGroundRoot(portIndexes, unionFind, voltageSources);
         if (preferredGroundRoot != null) {
             nodeByRoot.put(preferredGroundRoot, 0);
         }
@@ -317,14 +370,18 @@ public final class CircuitNetwork {
                 buildNodes(portList, nodeByPort, nodeCount, "circuit_node"),
                 equationRecorder.conductances(),
                 equationRecorder.currentSources(),
-                equationRecorder.voltageSources(),
+                voltageSources,
                 equationRecorder.voltageControlledCurrentSources(),
                 equationRecorder.voltageControlledVoltageSources(),
                 equationRecorder.currentControlledCurrentSources(),
                 equationRecorder.currentControlledVoltageSources(),
                 nonlinearElements(),
                 List.copyOf(transientElements),
-                combineDiagnostics(topologyRecorder.diagnostics(), equationRecorder.diagnostics()),
+                combineDiagnostics(
+                        topologyRecorder.diagnostics(),
+                        equationRecorder.diagnostics(),
+                        fieldRecorder.diagnostics()
+                ),
                 terminals(),
                 List.copyOf(elements.values())
         );
@@ -340,6 +397,10 @@ public final class CircuitNetwork {
         DisjointSet unionFind = new DisjointSet(portList.size());
         TopologyRecorder topologyRecorder = new TopologyRecorder(portIndexes, unionFind);
         EquationRecorder equationRecorder = new EquationRecorder(portIndexes);
+        FieldCoupledVoltageRecorder fieldRecorder = new FieldCoupledVoltageRecorder(
+                portIndexes,
+                fieldInducedVoltageResolver
+        );
         TransientEquationRecorder transientRecorder = new TransientEquationRecorder(
                 portIndexes,
                 timeStepSeconds,
@@ -359,6 +420,11 @@ public final class CircuitNetwork {
             }
         }
         for (CircuitElement element : elements.values()) {
+            if (element instanceof FieldInducedVoltageSourceElement fieldElement) {
+                fieldRecorder.record(fieldElement);
+            }
+        }
+        for (CircuitElement element : elements.values()) {
             if (element instanceof TransientCircuitElement transientElement) {
                 transientRecorder.record(element, transientElement);
             }
@@ -368,7 +434,7 @@ public final class CircuitNetwork {
         }
 
         List<VoltageSourceStamp> voltageSources = combineVoltageSources(
-                equationRecorder.voltageSources(),
+                combineVoltageSources(equationRecorder.voltageSources(), fieldRecorder.voltageSources()),
                 transientRecorder.voltageSources()
         );
 
@@ -408,6 +474,7 @@ public final class CircuitNetwork {
                 combineDiagnostics(
                         topologyRecorder.diagnostics(),
                         equationRecorder.diagnostics(),
+                        fieldRecorder.diagnostics(),
                         transientRecorder.diagnostics()
                 )
         );
@@ -885,6 +952,28 @@ public final class CircuitNetwork {
         return List.copyOf(nonlinearElements);
     }
 
+    @FunctionalInterface
+    public interface FieldInducedVoltageResolver {
+        FieldInducedVoltage resolve(ResourceLocation coilId);
+    }
+
+    public record FieldInducedVoltage(OptionalDouble voltageVolts, boolean available, boolean stale) {
+        public FieldInducedVoltage {
+            voltageVolts = Objects.requireNonNull(voltageVolts, "voltageVolts");
+        }
+
+        public static FieldInducedVoltage available(double voltageVolts, boolean stale) {
+            if (!Double.isFinite(voltageVolts)) {
+                throw new IllegalArgumentException("voltageVolts must be finite");
+            }
+            return new FieldInducedVoltage(OptionalDouble.of(voltageVolts), true, stale);
+        }
+
+        public static FieldInducedVoltage unavailable() {
+            return new FieldInducedVoltage(OptionalDouble.empty(), false, false);
+        }
+    }
+
     final class PreparedTransientPlan {
         private final double timeStepSeconds;
         private final PreparedTransientTopology baseTopology;
@@ -1355,6 +1444,105 @@ public final class CircuitNetwork {
                 throw new IllegalArgumentException("Topology port was not returned by ports(): " + port);
             }
             return port;
+        }
+    }
+
+    private static final class FieldCoupledVoltageRecorder {
+        private final Map<CircuitPort, Integer> portIndexes;
+        private final FieldInducedVoltageResolver resolver;
+        private final List<VoltageSourceStamp> voltageSources = new ArrayList<>();
+        private final List<CircuitDiagnostic> diagnostics = new ArrayList<>();
+
+        private FieldCoupledVoltageRecorder(
+                Map<CircuitPort, Integer> portIndexes,
+                FieldInducedVoltageResolver resolver
+        ) {
+            this.portIndexes = portIndexes;
+            this.resolver = resolver;
+        }
+
+        private void record(FieldInducedVoltageSourceElement element) {
+            int voltageSourceSize = voltageSources.size();
+            try {
+                CircuitPort checkedPositivePort = requirePort(element.positivePort(), "positivePort");
+                CircuitPort checkedNegativePort = requirePort(element.negativePort(), "negativePort");
+                FieldInducedVoltage inducedVoltage = Objects.requireNonNull(
+                        resolver.resolve(element.coilId()),
+                        "field induced voltage resolver returned null"
+                );
+                if (!inducedVoltage.available()) {
+                    diagnostics.add(new CircuitDiagnostic(
+                            CircuitDiagnosticType.FIELD_COUPLING_NOT_AVAILABLE,
+                            CircuitDiagnosticSeverity.WARNING,
+                            element.ports(),
+                            "Field coil " + element.coilId() + " is not available; stamping 0V"
+                    ));
+                } else if (inducedVoltage.stale()) {
+                    diagnostics.add(new CircuitDiagnostic(
+                            CircuitDiagnosticType.FIELD_COUPLING_STALE,
+                            CircuitDiagnosticSeverity.WARNING,
+                            element.ports(),
+                            "Field coil " + element.coilId() + " sample is stale"
+                    ));
+                }
+
+                double voltageVolts = inducedVoltage.voltageVolts().orElse(0.0) * element.voltageScale();
+                if (!Double.isFinite(voltageVolts)) {
+                    throw new IllegalArgumentException("field-induced voltage must be finite");
+                }
+                voltageSources.add(new VoltageSourceStamp(
+                        element.id(),
+                        new CircuitBranchCurrent(ResourceLocation.fromNamespaceAndPath(
+                                element.id().getNamespace(),
+                                element.id().getPath() + "/field_induced_branch_current"
+                        )),
+                        checkedPositivePort,
+                        checkedNegativePort,
+                        voltageVolts
+                ));
+            } catch (RuntimeException exception) {
+                trim(voltageSources, voltageSourceSize);
+                diagnostics.add(new CircuitDiagnostic(
+                        CircuitDiagnosticType.ELEMENT_STAMP_FAILED,
+                        CircuitDiagnosticSeverity.ERROR,
+                        element.ports(),
+                        stampFailureMessage(element, exception)
+                ));
+                EMcore.LOGGER.warn("Field-coupled circuit element {} failed while stamping equations", element.id(), exception);
+            }
+        }
+
+        private List<VoltageSourceStamp> voltageSources() {
+            return List.copyOf(voltageSources);
+        }
+
+        private List<CircuitDiagnostic> diagnostics() {
+            return List.copyOf(diagnostics);
+        }
+
+        private CircuitPort requirePort(CircuitPort port, String name) {
+            Objects.requireNonNull(port, name);
+            if (!portIndexes.containsKey(port)) {
+                throw new IllegalArgumentException("Field-coupled stamped port was not returned by ports(): " + port);
+            }
+            return port;
+        }
+
+        private static String stampFailureMessage(
+                FieldInducedVoltageSourceElement element,
+                RuntimeException exception
+        ) {
+            String detail = exception.getMessage();
+            if (detail == null || detail.isBlank()) {
+                return "Element " + element.id() + " failed while stamping field-coupled equations";
+            }
+            return "Element " + element.id() + " failed while stamping field-coupled equations: " + detail;
+        }
+
+        private static <T> void trim(List<T> values, int size) {
+            while (values.size() > size) {
+                values.removeLast();
+            }
         }
     }
 

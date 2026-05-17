@@ -23,6 +23,7 @@ import com.firedoge.emcore.api.circuit.CircuitSnapshot;
 import com.firedoge.emcore.api.circuit.CircuitTopologyBuilder;
 import com.firedoge.emcore.api.circuit.CircuitTopologyElement;
 import com.firedoge.emcore.api.circuit.DiodeElement;
+import com.firedoge.emcore.api.circuit.FieldInducedVoltageSourceElement;
 import com.firedoge.emcore.api.circuit.InductorElement;
 import com.firedoge.emcore.api.circuit.LinearCircuitElement;
 import com.firedoge.emcore.api.circuit.ResistorElement;
@@ -42,6 +43,8 @@ public final class CircuitNetworkSmokeTest {
 
     public static void main(String[] args) {
         solvesSourceResistorLoop();
+        solvesFieldInducedVoltageSource();
+        reportsUnavailableFieldCoupling();
         stepsTransientRcChargingCircuit();
         stepsTransientRlEnergizingCircuit();
         stepsTransientDiodeCapacitorChargingCircuit();
@@ -82,6 +85,58 @@ public final class CircuitNetworkSmokeTest {
         assertClose(0.0, samples.get(loop.sourceNegative()).voltageVolts(), "source negative voltage");
         assertClose(2.0, Math.abs(samples.get(loop.resistorPositive()).currentAmps()), "resistor current");
         assertClose(24.0, Math.abs(samples.get(loop.resistorPositive()).powerWatts()), "resistor power");
+    }
+
+    private static void solvesFieldInducedVoltageSource() {
+        ResourceLocation coilId = id("coil/source");
+        CircuitNetwork network = new CircuitNetwork(requestedCoilId -> requestedCoilId.equals(coilId)
+                ? CircuitNetwork.FieldInducedVoltage.available(12.0, false)
+                : CircuitNetwork.FieldInducedVoltage.unavailable());
+        CircuitPort sourcePositive = port("field_source/source_positive", new BlockPos(0, 0, 0));
+        CircuitPort sourceNegative = port("field_source/source_negative", new BlockPos(1, 0, 0));
+        CircuitPort resistorPositive = port("field_source/resistor_positive", new BlockPos(0, 0, 1));
+        CircuitPort resistorNegative = port("field_source/resistor_negative", new BlockPos(1, 0, 1));
+
+        network.registerElement(new FieldInducedVoltageSourceElement(
+                id("field_source/source"),
+                sourcePositive,
+                sourceNegative,
+                coilId
+        ));
+        network.registerElement(new ResistorElement(
+                id("field_source/resistor"),
+                resistorPositive,
+                resistorNegative,
+                6.0
+        ));
+        network.registerElement(new TestIdealLinkElement(id("field_source/positive_wire"), sourcePositive, resistorPositive));
+        network.registerElement(new TestIdealLinkElement(id("field_source/negative_wire"), sourceNegative, resistorNegative));
+
+        CircuitSnapshot snapshot = network.snapshot(0.0);
+        Map<CircuitPort, CircuitSample> samples = samplesByPort(snapshot);
+
+        assertEquals(0, snapshot.diagnostics().size(), "field-induced source diagnostics");
+        assertClose(12.0, samples.get(sourcePositive).voltageVolts(), "field-induced source positive voltage");
+        assertClose(0.0, samples.get(sourceNegative).voltageVolts(), "field-induced source negative voltage");
+        assertClose(2.0, Math.abs(samples.get(resistorPositive).currentAmps()), "field-induced resistor current");
+    }
+
+    private static void reportsUnavailableFieldCoupling() {
+        ResourceLocation coilId = id("coil/missing");
+        CircuitNetwork network = new CircuitNetwork(ignored -> CircuitNetwork.FieldInducedVoltage.unavailable());
+        CircuitPort positive = port("missing_field_source/positive", new BlockPos(0, 0, 0));
+        CircuitPort negative = port("missing_field_source/negative", new BlockPos(1, 0, 0));
+
+        network.registerElement(new FieldInducedVoltageSourceElement(
+                id("missing_field_source/source"),
+                positive,
+                negative,
+                coilId
+        ));
+
+        CircuitSnapshot snapshot = network.snapshot(0.0);
+
+        assertHasDiagnostic(snapshot, CircuitDiagnosticType.FIELD_COUPLING_NOT_AVAILABLE);
     }
 
     private static void stepsTransientRcChargingCircuit() {

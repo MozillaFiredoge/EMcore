@@ -13,26 +13,36 @@ The project should keep the same boundary across all subsystems:
 ## Current Status
 
 - Circuits MVP: DC, AC phasor, transient fixed-step, nonlinear Newton-Raphson, batch transient solves, diagnostics,
-  and public circuit element APIs are in place.
+  public circuit element APIs, and field-induced voltage source coupling are in place.
 - Signals MVP: source registration, channel sampling, attenuation, phase/delay, interference reporting, and AC
   circuit coupling are in place.
+- Fields MVP: finite field regions, electrostatic Poisson solving, magnetostatic vector-potential solving, field
+  samples, flux/coil sampling, circuit-current driven field sources, induced-voltage circuit coupling, and
+  force/torque/energy probes are in place.
 - Example gameplay content is intentionally out of scope for this repository. Demonstrations should live in addon
   mods or compat modules.
 
+The current public API guides are:
+
+- [`circuit-api.md`](circuit-api.md)
+- [`field-api.md`](field-api.md)
+- [`signal-api.md`](signal-api.md)
+
 ## Near-Term Direction
 
-The next major subsystem is Fields. The goal is not a distance lookup pretending to be a field. Fields should become
-world-space state that exists continuously and can be sampled by blocks, entities, contraptions, and other systems.
+The Fields MVP is now in place. The goal remains broader than distance lookups: fields should behave as world-space
+state that can be sampled by blocks, entities, contraptions, and other systems.
 
-Initial field work should prioritize electrostatic Poisson solving:
+The initial electrostatic backend is based on Poisson solving:
 
 ```text
 div(epsilon grad(phi)) = -rho
 E = -grad(phi)
 ```
 
-This is enough to establish the field infrastructure, prove the sampling API, and support static electric field
-interactions without taking on full Maxwell time stepping.
+This established the field infrastructure, sampling API, and static electric field interactions without taking on
+full Maxwell time stepping. Near-term field work should now prioritize documentation, diagnostics, region/probe-cloud
+integration, material models, and performance budgets.
 
 ## Milestone 1: Field API Skeleton
 
@@ -205,8 +215,8 @@ These rules apply to all future field work:
 
 ## Suggested Immediate Tasks
 
-1. Add the `field` API package and `FieldAccess` skeleton.
-2. Add an internal world field registry with source/region registration and snapshot sampling.
-3. Implement `PreparedFieldRegion` with a simple fixed-grid Poisson solver backend.
-4. Add field debug commands for `solve`, `sample`, and `regions`.
-5. Only after that, design the generic moving-body and force/torque bridge.
+1. Keep `field-api.md`, `circuit-api.md`, and `signal-api.md` aligned with public API changes.
+2. Add region/probe-cloud integration APIs for force, torque, and energy over larger structures.
+3. Improve field coupling diagnostics for missing ports, missing coils, stale fields, and coupling latency.
+4. Expand materials beyond relative permittivity: magnetic permeability, conductivity, and shielding/boundaries.
+5. Add performance benchmarks for representative region sizes and solve budgets before considering JNI backends.

@@ -17,14 +17,21 @@ import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
 import com.firedoge.emcore.api.circuit.CircuitTerminal;
 import com.firedoge.emcore.api.event.ElectromagneticEventListener;
+import com.firedoge.emcore.api.field.ChargedFieldProbe;
+import com.firedoge.emcore.api.field.CircuitDrivenFieldSource;
 import com.firedoge.emcore.api.field.CoilRegion;
+import com.firedoge.emcore.api.field.CoilTorqueProbe;
+import com.firedoge.emcore.api.field.CurrentSegmentProbe;
 import com.firedoge.emcore.api.field.ElectricFieldSample;
 import com.firedoge.emcore.api.field.FieldAccess;
+import com.firedoge.emcore.api.field.FieldEnergySample;
+import com.firedoge.emcore.api.field.FieldForceSample;
 import com.firedoge.emcore.api.field.FieldRegion;
 import com.firedoge.emcore.api.field.FieldSample;
 import com.firedoge.emcore.api.field.FieldSnapshot;
 import com.firedoge.emcore.api.field.FieldSolveResult;
 import com.firedoge.emcore.api.field.FieldSource;
+import com.firedoge.emcore.api.field.FieldTorqueSample;
 import com.firedoge.emcore.api.field.FluxProbe;
 import com.firedoge.emcore.api.field.FluxSample;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
@@ -115,6 +122,14 @@ public final class Electromagnetics {
         }
 
         @Override
+        public void registerCircuitDrivenSource(ServerLevel level, CircuitDrivenFieldSource source) {
+        }
+
+        @Override
+        public void unregisterCircuitDrivenSource(ServerLevel level, ResourceLocation sourceId) {
+        }
+
+        @Override
         public List<FieldRegion> regions(ServerLevel level) {
             return List.of();
         }
@@ -130,12 +145,42 @@ public final class Electromagnetics {
         }
 
         @Override
+        public List<CircuitDrivenFieldSource> circuitDrivenSources(ServerLevel level) {
+            return List.of();
+        }
+
+        @Override
         public FieldSnapshot snapshot(ServerLevel level) {
             return new FieldSnapshot(List.of(), List.of(), List.of(), List.of(), 0L, false);
         }
 
         @Override
         public Optional<FieldSample> sample(ServerLevel level, Vec3 position) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<FieldEnergySample> sampleEnergy(ServerLevel level, Vec3 position) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<FieldForceSample> sampleForce(ServerLevel level, ChargedFieldProbe probe) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<FieldForceSample> sampleForce(ServerLevel level, CurrentSegmentProbe probe) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<FieldTorqueSample> sampleTorque(ServerLevel level, CoilTorqueProbe probe) {
+            return Optional.empty();
+        }
+
+        @Override
+        public Optional<FieldTorqueSample> sampleCoilTorque(ServerLevel level, ResourceLocation coilId, double currentAmps) {
             return Optional.empty();
         }
 

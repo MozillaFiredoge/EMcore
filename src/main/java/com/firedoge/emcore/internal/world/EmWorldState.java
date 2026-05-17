@@ -1,8 +1,11 @@
 package com.firedoge.emcore.internal.world;
 
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Objects;
 import java.util.Optional;
+import java.util.OptionalDouble;
 
 import com.firedoge.emcore.api.circuit.AcCircuitSample;
 import com.firedoge.emcore.api.circuit.AcCircuitSnapshot;
@@ -11,13 +14,20 @@ import com.firedoge.emcore.api.circuit.CircuitPort;
 import com.firedoge.emcore.api.circuit.CircuitSample;
 import com.firedoge.emcore.api.circuit.CircuitSnapshot;
 import com.firedoge.emcore.api.circuit.CircuitTerminal;
+import com.firedoge.emcore.api.field.ChargedFieldProbe;
+import com.firedoge.emcore.api.field.CircuitDrivenFieldSource;
 import com.firedoge.emcore.api.field.CoilRegion;
+import com.firedoge.emcore.api.field.CoilTorqueProbe;
+import com.firedoge.emcore.api.field.CurrentSegmentProbe;
 import com.firedoge.emcore.api.field.ElectricFieldSample;
+import com.firedoge.emcore.api.field.FieldEnergySample;
+import com.firedoge.emcore.api.field.FieldForceSample;
 import com.firedoge.emcore.api.field.FieldRegion;
 import com.firedoge.emcore.api.field.FieldSample;
 import com.firedoge.emcore.api.field.FieldSnapshot;
 import com.firedoge.emcore.api.field.FieldSolveResult;
 import com.firedoge.emcore.api.field.FieldSource;
+import com.firedoge.emcore.api.field.FieldTorqueSample;
 import com.firedoge.emcore.api.field.FluxProbe;
 import com.firedoge.emcore.api.field.FluxSample;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
@@ -38,14 +48,17 @@ public final class EmWorldState {
 
     private final ResourceKey<Level> dimension;
     private final FieldNetwork fieldNetwork = new FieldNetwork();
-    private final CircuitNetwork circuitNetwork = new CircuitNetwork();
+    private final CircuitNetwork circuitNetwork;
     private final SignalNetwork signalNetwork = new SignalNetwork();
+    private final Map<ResourceLocation, CircuitDrivenFieldSource> circuitDrivenFieldSources = new LinkedHashMap<>();
+    private final Map<ResourceLocation, FieldSource> generatedCircuitDrivenSources = new LinkedHashMap<>();
     private long gameTicks;
     private double simulatedTimeSeconds;
     private double transientTimeSeconds;
 
     public EmWorldState(ResourceKey<Level> dimension) {
         this.dimension = Objects.requireNonNull(dimension, "dimension");
+        this.circuitNetwork = new CircuitNetwork(this::fieldInducedVoltage);
     }
 
     public ResourceKey<Level> dimension() {
@@ -57,6 +70,8 @@ public final class EmWorldState {
         simulatedTimeSeconds += GAME_TICK_SECONDS;
         fieldNetwork.tick();
         circuitNetwork.tick();
+        syncCircuitDrivenFieldSources();
+        fieldNetwork.tick();
     }
 
     public long gameTicks() {
@@ -91,6 +106,26 @@ public final class EmWorldState {
         return fieldNetwork.sampleCoil(coilId, simulatedTimeSeconds);
     }
 
+    public Optional<FieldEnergySample> sampleFieldEnergy(Vec3 position) {
+        return fieldNetwork.sampleEnergy(position);
+    }
+
+    public Optional<FieldForceSample> sampleFieldForce(ChargedFieldProbe probe) {
+        return fieldNetwork.sampleForce(probe);
+    }
+
+    public Optional<FieldForceSample> sampleFieldForce(CurrentSegmentProbe probe) {
+        return fieldNetwork.sampleForce(probe);
+    }
+
+    public Optional<FieldTorqueSample> sampleFieldTorque(CoilTorqueProbe probe) {
+        return fieldNetwork.sampleTorque(probe);
+    }
+
+    public Optional<FieldTorqueSample> sampleFieldCoilTorque(ResourceLocation coilId, double currentAmps) {
+        return fieldNetwork.sampleCoilTorque(coilId, currentAmps);
+    }
+
     public void registerFieldRegion(FieldRegion region) {
         fieldNetwork.registerRegion(region);
     }
@@ -115,6 +150,21 @@ public final class EmWorldState {
         fieldNetwork.unregisterCoil(coilId);
     }
 
+    public void registerCircuitDrivenFieldSource(CircuitDrivenFieldSource source) {
+        Objects.requireNonNull(source, "source");
+        circuitDrivenFieldSources.put(source.id(), source);
+        generatedCircuitDrivenSources.remove(source.id());
+        fieldNetwork.unregisterSource(source.id());
+    }
+
+    public void unregisterCircuitDrivenFieldSource(ResourceLocation sourceId) {
+        Objects.requireNonNull(sourceId, "sourceId");
+        if (circuitDrivenFieldSources.remove(sourceId) != null) {
+            generatedCircuitDrivenSources.remove(sourceId);
+            fieldNetwork.unregisterSource(sourceId);
+        }
+    }
+
     public List<FieldRegion> fieldRegions() {
         return fieldNetwork.regions();
     }
@@ -125,6 +175,10 @@ public final class EmWorldState {
 
     public List<CoilRegion> fieldCoils() {
         return fieldNetwork.coils();
+    }
+
+    public List<CircuitDrivenFieldSource> circuitDrivenFieldSources() {
+        return List.copyOf(circuitDrivenFieldSources.values());
     }
 
     public FieldSnapshot fieldSnapshot() {
@@ -141,6 +195,42 @@ public final class EmWorldState {
 
     public boolean requestFieldSolve(ResourceLocation regionId) {
         return fieldNetwork.requestSolve(regionId);
+    }
+
+    private CircuitNetwork.FieldInducedVoltage fieldInducedVoltage(ResourceLocation coilId) {
+        Optional<FluxSample> sample = fieldNetwork.sampleCoil(coilId, simulatedTimeSeconds);
+        if (sample.isEmpty()) {
+            return CircuitNetwork.FieldInducedVoltage.unavailable();
+        }
+
+        FluxSample fluxSample = sample.orElseThrow();
+        OptionalDouble inducedVoltage = fluxSample.inducedVoltageVolts();
+        return CircuitNetwork.FieldInducedVoltage.available(
+                inducedVoltage.orElse(0.0),
+                fluxSample.stale()
+        );
+    }
+
+    private void syncCircuitDrivenFieldSources() {
+        if (circuitDrivenFieldSources.isEmpty()) {
+            return;
+        }
+
+        for (CircuitDrivenFieldSource source : circuitDrivenFieldSources.values()) {
+            Optional<CircuitSample> sample = circuitNetwork.samplePort(source.currentPort());
+            if (sample.isEmpty()) {
+                if (generatedCircuitDrivenSources.remove(source.id()) != null) {
+                    fieldNetwork.unregisterSource(source.id());
+                }
+                continue;
+            }
+
+            FieldSource fieldSource = source.fieldSource(sample.orElseThrow().currentAmps());
+            if (!fieldSource.equals(generatedCircuitDrivenSources.get(source.id()))) {
+                fieldNetwork.registerSource(fieldSource);
+                generatedCircuitDrivenSources.put(source.id(), fieldSource);
+            }
+        }
     }
 
     public CircuitSnapshot circuitSnapshot() {

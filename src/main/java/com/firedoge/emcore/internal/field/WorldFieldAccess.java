@@ -4,14 +4,21 @@ import java.util.List;
 import java.util.Objects;
 import java.util.Optional;
 
+import com.firedoge.emcore.api.field.ChargedFieldProbe;
+import com.firedoge.emcore.api.field.CircuitDrivenFieldSource;
 import com.firedoge.emcore.api.field.CoilRegion;
+import com.firedoge.emcore.api.field.CoilTorqueProbe;
+import com.firedoge.emcore.api.field.CurrentSegmentProbe;
 import com.firedoge.emcore.api.field.ElectricFieldSample;
 import com.firedoge.emcore.api.field.FieldAccess;
+import com.firedoge.emcore.api.field.FieldEnergySample;
+import com.firedoge.emcore.api.field.FieldForceSample;
 import com.firedoge.emcore.api.field.FieldRegion;
 import com.firedoge.emcore.api.field.FieldSample;
 import com.firedoge.emcore.api.field.FieldSnapshot;
 import com.firedoge.emcore.api.field.FieldSolveResult;
 import com.firedoge.emcore.api.field.FieldSource;
+import com.firedoge.emcore.api.field.FieldTorqueSample;
 import com.firedoge.emcore.api.field.FluxProbe;
 import com.firedoge.emcore.api.field.FluxSample;
 import com.firedoge.emcore.api.field.MagneticFieldSample;
@@ -60,6 +67,16 @@ public final class WorldFieldAccess implements FieldAccess {
     }
 
     @Override
+    public void registerCircuitDrivenSource(ServerLevel level, CircuitDrivenFieldSource source) {
+        worldManager.getOrCreate(level).registerCircuitDrivenFieldSource(source);
+    }
+
+    @Override
+    public void unregisterCircuitDrivenSource(ServerLevel level, ResourceLocation sourceId) {
+        worldManager.getOrCreate(level).unregisterCircuitDrivenFieldSource(sourceId);
+    }
+
+    @Override
     public List<FieldRegion> regions(ServerLevel level) {
         return worldManager.getOrCreate(level).fieldRegions();
     }
@@ -75,6 +92,11 @@ public final class WorldFieldAccess implements FieldAccess {
     }
 
     @Override
+    public List<CircuitDrivenFieldSource> circuitDrivenSources(ServerLevel level) {
+        return worldManager.getOrCreate(level).circuitDrivenFieldSources();
+    }
+
+    @Override
     public FieldSnapshot snapshot(ServerLevel level) {
         return worldManager.getOrCreate(level).fieldSnapshot();
     }
@@ -82,6 +104,31 @@ public final class WorldFieldAccess implements FieldAccess {
     @Override
     public Optional<FieldSample> sample(ServerLevel level, Vec3 position) {
         return worldManager.getOrCreate(level).sampleField(position);
+    }
+
+    @Override
+    public Optional<FieldEnergySample> sampleEnergy(ServerLevel level, Vec3 position) {
+        return worldManager.getOrCreate(level).sampleFieldEnergy(position);
+    }
+
+    @Override
+    public Optional<FieldForceSample> sampleForce(ServerLevel level, ChargedFieldProbe probe) {
+        return worldManager.getOrCreate(level).sampleFieldForce(probe);
+    }
+
+    @Override
+    public Optional<FieldForceSample> sampleForce(ServerLevel level, CurrentSegmentProbe probe) {
+        return worldManager.getOrCreate(level).sampleFieldForce(probe);
+    }
+
+    @Override
+    public Optional<FieldTorqueSample> sampleTorque(ServerLevel level, CoilTorqueProbe probe) {
+        return worldManager.getOrCreate(level).sampleFieldTorque(probe);
+    }
+
+    @Override
+    public Optional<FieldTorqueSample> sampleCoilTorque(ServerLevel level, ResourceLocation coilId, double currentAmps) {
+        return worldManager.getOrCreate(level).sampleFieldCoilTorque(coilId, currentAmps);
     }
 
     @Override
